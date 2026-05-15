@@ -1,0 +1,6 @@
+{
+  "name": "update-cart",
+  "version": "1.0.0",
+  "description": "Update cart: clear, remove item, update quantity, or change location",
+  "license": "MIT-0"
+}

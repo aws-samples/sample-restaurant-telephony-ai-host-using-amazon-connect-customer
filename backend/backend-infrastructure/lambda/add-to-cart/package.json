@@ -1,0 +1,19 @@
+{
+  "name": "add-to-cart",
+  "version": "1.0.0",
+  "description": "Lambda function to add items to cart with availability verification",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.700.0",
+    "@aws-sdk/lib-dynamodb": "^3.700.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "license": "MIT-0"
+}

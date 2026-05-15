@@ -1,0 +1,19 @@
+# Python (test client)
+__pycache__/
+*.py[cod]
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env

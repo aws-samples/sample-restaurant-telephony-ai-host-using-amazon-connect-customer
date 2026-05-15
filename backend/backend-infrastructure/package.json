@@ -1,0 +1,36 @@
+{
+  "name": "backend-infrastructure",
+  "version": "1.0.0",
+  "description": "Backend Infrastructure CDK project for QSR ordering system (telephony-voice-ordering-agent port)",
+  "main": "index.js",
+  "directories": {
+    "lib": "lib"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "test": "jest",
+    "cdk": "cdk",
+    "synth": "cdk synth",
+    "deploy": "cdk deploy",
+    "diff": "cdk diff",
+    "destroy": "cdk destroy",
+    "nag": "npm run build && cdk synth --quiet"
+  },
+  "keywords": [],
+  "author": "Team Member A",
+  "license": "MIT-0",
+  "type": "commonjs",
+  "dependencies": {
+    "aws-cdk-lib": "^2.233.0",
+    "cdk-nag": "^2.37.55",
+    "constructs": "^10.4.4",
+    "source-map-support": "^0.5.21"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.3",
+    "aws-cdk": "^2.1100.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}

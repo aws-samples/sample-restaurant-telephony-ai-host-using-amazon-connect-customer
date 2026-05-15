@@ -1,0 +1,6 @@
+{
+  "name": "get-cart",
+  "version": "1.0.0",
+  "description": "Get current cart contents for a customer",
+  "license": "MIT-0"
+}

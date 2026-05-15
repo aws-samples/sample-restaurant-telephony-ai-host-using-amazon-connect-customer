@@ -1,0 +1,80 @@
+# --- Reference project (kept locally for design/reference only; not tracked) ---
+reference-project/
+
+# --- OS / editors ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.iml
+
+# --- Node / CDK ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+cdk.out/
+cdk.context.json
+*.tsbuildinfo
+
+# --- Python (for the cloud-built agent + bridge; no local Python is required,
+# but ignore these in case a contributor inspects images locally) ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.env
+.env.local
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# --- Docker ---
+*.dockerignore.local
+
+# --- CDK outputs staging ---
+cdk-outputs/
+*.log
+
+# --- Session scratch (ad-hoc deploy payloads, JSON probes, etc.) ---
+.deploy-tmp/
+
+# --- Build / artifact dirs ---
+dist/
+build/
+out/
+tmp/
+# Exception: our CDK module dir IS named `build/` — it's not a build artifact.
+!backend/agentcore-runtime-telephony/cdk/build/
+!backend/agentcore-runtime-telephony/cdk/build/**
+
+# --- Per-deploy state file (runtime artifact written by scripts/deploy-all.sh) ---
+# Singular file keyed by component (tel-network, tel-agent-ecr, ...), matching
+# the reference project's shape — NOT per-prefix.
+.deployment-state.json
+.deployment-state*.json
+.deploy-tmp/
+
+# --- Kiro steering (workspace-local; may contain account IDs and other secrets) ---
+.kiro*
+
+# --- Synthetic data generator output (per-deploy seeded customer + menu rows) ---
+backend/synthetic-data/output/*.json
+
+# --- Reference materials downloaded locally for review (not tracked) ---
+real-time-communication-on-aws.pdf
+real-time-communication-on-aws.txt
+
+# --- IDE / agent session state ---
+session.backup
+*.session.backup
