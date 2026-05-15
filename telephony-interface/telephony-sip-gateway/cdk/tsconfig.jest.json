@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node", "jest"]
+  },
+  "include": ["lib/**/*", "test/**/*"],
+  "exclude": ["node_modules", "cdk.out"]
+}

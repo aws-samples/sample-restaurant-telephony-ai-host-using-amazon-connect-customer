@@ -1,0 +1,1009 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Telephony Voice Agent — How a Call Works (Step by Step)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root {
+    --bg-0: #05070d;
+    --bg-1: #0a0f1a;
+    --bg-2: #111a2d;
+    --grid: rgba(80,120,200,.05);
+    --txt: #d7e1f0;
+    --txt-dim: #7b8aa5;
+    --txt-mute: #4a5669;
+    --edge: rgba(120,160,220,.18);
+    --edge-hot: rgba(200,230,255,.9);
+    --edge-active: #5aa4ff;
+    --glass: rgba(20,30,50,.55);
+    --glass-brd: rgba(120,180,255,.2);
+
+    --phone: #ffffff;
+    --sip: #ff9f43;       /* SIP signaling */
+    --audio-in: #22d3ee;  /* caller audio (up) */
+    --audio-out: #d946ef; /* Nova Sonic audio (down) */
+    --ctrl: #ffffff;      /* WS / auth / handshake */
+    --tool: #34d399;      /* MCP + REST tool calls */
+    --db: #a78bfa;        /* DynamoDB + Location */
+    --prompt: #facc15;    /* prompt renderer path */
+
+    --node-idle: rgba(40,55,85,.85);
+    --node-active-brd: #5aa4ff;
+    --node-active-bg: rgba(90,164,255,.12);
+    --node-active-shadow: 0 0 24px rgba(90,164,255,.45);
+
+    --mono: ui-monospace, "JetBrains Mono", "Fira Code", Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg-0); color: var(--txt); font-family: var(--sans); overflow: hidden; }
+
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background:
+      radial-gradient(ellipse at 20% 10%, rgba(60,120,220,.10), transparent 60%),
+      radial-gradient(ellipse at 80% 90%, rgba(180,60,200,.07), transparent 60%),
+      linear-gradient(var(--grid) 1px, transparent 1px) 0 0 / 48px 48px,
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0 / 48px 48px,
+      var(--bg-0);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  header {
+    position: relative; z-index: 10;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 20px;
+    backdrop-filter: blur(12px);
+    background: linear-gradient(180deg, rgba(10,15,26,.85), rgba(10,15,26,.4));
+    border-bottom: 1px solid var(--glass-brd);
+  }
+  header h1 {
+    font-size: 14px; font-weight: 600; margin: 0; letter-spacing: .02em;
+    display: flex; align-items: center; gap: 10px;
+  }
+  header h1::before {
+    content: ''; width: 8px; height: 8px; border-radius: 50%;
+    background: #22d3ee; box-shadow: 0 0 10px #22d3ee;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+
+  .ctrls { display: flex; gap: 8px; align-items: center; }
+  button {
+    background: var(--glass); color: var(--txt);
+    border: 1px solid var(--glass-brd); border-radius: 8px;
+    padding: 6px 14px; font: 12px var(--mono);
+    cursor: pointer; transition: all .15s;
+  }
+  button:hover { border-color: var(--edge-active); color: #fff; box-shadow: 0 0 12px rgba(90,164,255,.25); }
+  button:disabled { opacity: .35; cursor: not-allowed; }
+  button.primary { background: var(--edge-active); color: #051021; border-color: var(--edge-active); font-weight: 600; }
+  button.primary:hover { background: #76b3ff; }
+
+  main {
+    position: relative; z-index: 1;
+    display: grid; grid-template-columns: 1fr 320px;
+    height: calc(100vh - 48px);
+  }
+
+  #stage { position: relative; overflow: hidden; }
+  svg.topology { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+  aside {
+    border-left: 1px solid var(--glass-brd);
+    background: linear-gradient(180deg, rgba(10,15,26,.9), rgba(5,8,15,.85));
+    backdrop-filter: blur(10px);
+    padding: 16px 18px;
+    /* Explicit 60/40 split of the sidebar via CSS grid — flex-basis 0
+       + flex-grow ratios wasn't enforcing the split reliably (flex
+       items were falling back to content-size when the inner
+       scroll container couldn't resolve its height), letting
+       children paint over the panel below. Grid tracks are
+       unambiguous. */
+    display: grid;
+    grid-template-rows: 3fr 2fr;
+    gap: 12px;
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  .panel {
+    background: var(--glass);
+    border: 1px solid var(--glass-brd);
+    border-radius: 10px;
+    padding: 14px;
+  }
+  .panel h2 {
+    font-size: 10px; font-weight: 700; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--txt-dim); margin: 0 0 10px 0;
+  }
+
+  /* Step panel: vertical flex with a scrollable middle (the prose +
+     meta). Counter, title, nav, and progress stay fixed so the
+     Previous/Next/Start/End buttons NEVER overflow the panel box.
+     Height is governed by the sidebar's grid track (3fr of 5 = 60%). */
+  #stepBox {
+    min-height: 0;          /* grid clipping enabler */
+    display: flex; flex-direction: column;
+    overflow: hidden;       /* hard cap — children clip inside this box */
+  }
+  #stepBox .step-counter,
+  #stepBox .step-title,
+  #stepBox #stepNav,
+  #stepBox .progress {
+    flex: 0 0 auto;         /* fixed rows at top/bottom */
+  }
+  /* Scrollable middle: prose body + meta grouped so they scroll together. */
+  .step-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 4px;     /* breathing room for scrollbar */
+  }
+  .step-scroll::-webkit-scrollbar { width: 6px; }
+  .step-scroll::-webkit-scrollbar-track { background: transparent; }
+  .step-scroll::-webkit-scrollbar-thumb { background: rgba(120,180,255,.25); border-radius: 3px; }
+  .step-counter {
+    font: 11px var(--mono); color: var(--txt-mute);
+    margin-bottom: 6px; letter-spacing: .06em;
+  }
+  .step-title {
+    font-size: 18px; font-weight: 700; line-height: 1.25; margin-bottom: 10px;
+    color: #fff;
+  }
+  .step-body {
+    font-size: 13px; line-height: 1.55; color: var(--txt);
+  }
+  .step-body .hl { color: #7ab8ff; font-weight: 600; }
+  .step-body code {
+    background: rgba(90,164,255,.12); padding: 1px 6px; border-radius: 4px;
+    font: 11.5px var(--mono); color: #aee0ff;
+  }
+  .step-meta {
+    margin-top: 10px; padding-top: 10px;
+    border-top: 1px solid var(--glass-brd);
+    font: 11px var(--mono); color: var(--txt-dim);
+    line-height: 1.5;
+  }
+  .step-meta .k { color: var(--txt-mute); }
+  .step-meta .v { color: var(--txt); }
+
+  #stepNav {
+    display: flex; gap: 8px; align-items: center; justify-content: center;
+    margin-top: 10px;
+  }
+  #stepNav button {
+    flex: 1 1 auto;
+    padding: 8px 0;
+    font-size: 14px;
+    line-height: 1;
+    min-width: 0;   /* lets buttons shrink below content width if needed */
+  }
+  .progress {
+    height: 3px; background: rgba(90,164,255,.12); border-radius: 2px;
+    overflow: hidden; margin-top: 8px;
+  }
+  .progress-inner {
+    height: 100%; background: linear-gradient(90deg, var(--edge-active), #76b3ff);
+    width: 0; transition: width .35s;
+  }
+
+  /* "All steps" list panel below the step box. Height is governed by
+     the sidebar's grid track (2fr of 5 = 40%). */
+  #allStepsPanel {
+    min-height: 0;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .steps-list {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    margin-top: 2px;
+  }
+  .steps-list::-webkit-scrollbar { width: 6px; }
+  .steps-list::-webkit-scrollbar-track { background: transparent; }
+  .steps-list::-webkit-scrollbar-thumb { background: rgba(120,180,255,.25); border-radius: 3px; }
+  .step-row {
+    display: flex; align-items: start; gap: 8px;
+    padding: 6px 8px; border-radius: 6px;
+    font-size: 11.5px; line-height: 1.4;
+    color: var(--txt-dim); cursor: pointer;
+    transition: background .15s, color .15s;
+  }
+  .step-row:hover { background: rgba(90,164,255,.08); color: var(--txt); }
+  .step-row.done { color: var(--txt-mute); }
+  .step-row.done .step-row-num { background: rgba(120,180,255,.1); color: var(--txt-mute); }
+  .step-row.active {
+    background: rgba(90,164,255,.14); color: #fff;
+  }
+  .step-row.active .step-row-num { background: var(--edge-active); color: #051021; }
+  .step-row-num {
+    flex: 0 0 22px; height: 22px; border-radius: 4px;
+    background: rgba(120,180,255,.1); color: var(--txt-dim);
+    font: 600 10px var(--mono); text-align: center; line-height: 22px;
+  }
+
+  /* Nodes — vertical layout: icon on top, text below. */
+  #nodeLayer {
+    position: absolute; inset: 0; pointer-events: none;
+  }
+  .node-box {
+    position: absolute; pointer-events: auto;
+    background: var(--node-idle);
+    border: 1px solid rgba(120,180,255,.18);
+    border-radius: 10px;
+    padding: 10px 8px;
+    backdrop-filter: blur(8px);
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    text-align: center;
+    transition: border-color .35s, background .35s, box-shadow .35s, transform .35s;
+  }
+  .node-box.active {
+    border-color: var(--node-active-brd);
+    background: var(--node-active-bg);
+    box-shadow: var(--node-active-shadow);
+    transform: translate(-50%, -50%) scale(1.04);
+  }
+  .node-box.dim { opacity: .35; }
+  .node-icon { flex: 0 0 32px; height: 32px; display: flex; align-items: center; justify-content: center; }
+  .node-icon svg { width: 32px; height: 32px; }
+  .node-text { line-height: 1.25; width: 100%; }
+  .node-title { font-size: 11px; font-weight: 600; color: #fff; letter-spacing: .01em; }
+  .node-sub { font-size: 9px; color: var(--txt-dim); font-family: var(--mono); margin-top: 1px; }
+  .node-sub b { color: #7ab8ff; font-weight: 500; }
+
+  /* Clusters (pure SVG background regions) */
+  .cluster-label {
+    font: 600 11px var(--sans);
+    fill: rgba(180,210,255,.55);
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+
+  /* Edges — idle lines are colored by traffic type at low opacity
+     so people can "read" the topology even when nothing is animating. */
+  .edge-base {
+    fill: none; stroke-width: 1.4;
+    stroke-dasharray: 4 5;
+    opacity: .45;
+    transition: opacity .35s, stroke-width .35s;
+  }
+  .edge-base.live { opacity: 0; }  /* hidden when the hot version is pulsing */
+  .edge-hot {
+    stroke-width: 2.2; fill: none;
+    opacity: 0;
+    transition: opacity .35s;
+  }
+  .edge-hot.on {
+    opacity: .95;
+    filter: drop-shadow(0 0 6px currentColor);
+  }
+
+  /* Packets (animated dots) */
+  .packet { filter: drop-shadow(0 0 8px currentColor); }
+
+  /* Tooltips for nodes */
+  .node-tooltip {
+    position: absolute;
+    background: rgba(15,25,45,.96);
+    border: 1px solid rgba(120,180,255,.3);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font: 11.5px var(--sans); color: var(--txt);
+    max-width: 220px; pointer-events: none;
+    opacity: 0; transform: translateY(4px);
+    transition: opacity .15s, transform .15s;
+    z-index: 20;
+    box-shadow: 0 4px 16px rgba(0,0,0,.5);
+  }
+  .node-tooltip.show { opacity: 1; transform: translateY(0); }
+  .node-tooltip .tooltip-title { font-weight: 700; color: #fff; margin-bottom: 3px; }
+
+  /* Ports indicator badges above select nodes */
+  .port-badge {
+    position: absolute;
+    background: rgba(90,164,255,.2);
+    border: 1px solid rgba(90,164,255,.5);
+    color: #aee0ff;
+    font: 9.5px var(--mono);
+    padding: 2px 6px; border-radius: 3px;
+    pointer-events: none;
+    opacity: 0; transition: opacity .35s;
+    white-space: nowrap;
+  }
+  .port-badge.show { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Telephony Voice Agent &mdash; How a Call Works</h1>
+  <div class="ctrls">
+    <button id="autoPlay">Auto-play</button>
+    <button id="restart">Restart</button>
+  </div>
+</header>
+
+<main>
+  <section id="stage">
+    <svg class="topology" id="svg" viewBox="0 0 1170 800" preserveAspectRatio="xMidYMid meet">
+      <defs>
+        <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+          <feGaussianBlur stdDeviation="2.5" result="blur" />
+          <feMerge>
+            <feMergeNode in="blur" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,0 L10,5 L0,10 z" fill="rgba(200,230,255,.75)" />
+        </marker>
+      </defs>
+      <g id="clusters"></g>
+      <g id="edgesBase"></g>
+      <g id="edgesHot"></g>
+      <g id="packets"></g>
+    </svg>
+    <div id="nodeLayer"></div>
+  </section>
+
+  <aside>
+    <div class="panel" id="stepBox">
+      <div class="step-counter" id="stepCounter">STEP 0 OF 15</div>
+      <div class="step-title" id="stepTitle">Welcome</div>
+      <div class="step-scroll">
+        <div class="step-body" id="stepBody">Choose <b>Next</b> to start walking through what happens when a customer calls the restaurant.</div>
+        <div class="step-meta" id="stepMeta"></div>
+      </div>
+      <div id="stepNav">
+        <button id="jumpStart" title="First step">⏮</button>
+        <button id="prevStep" title="Previous step">◀</button>
+        <button id="nextStep" class="primary" title="Next step">▶</button>
+        <button id="jumpEnd" title="Last step">⏭</button>
+      </div>
+      <div class="progress"><div class="progress-inner" id="progressInner"></div></div>
+    </div>
+
+    <div class="panel" id="allStepsPanel">
+      <h2>All Steps</h2>
+      <div class="steps-list" id="stepsList"></div>
+    </div>
+  </aside>
+</main>
+
+<div class="node-tooltip" id="tooltip"></div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════
+// TOPOLOGY — r7 architecture (task public IPs, NLB TCP-only)
+// Each node has: x, y (center), w, h, label, sub (monospace line), icon
+// ═══════════════════════════════════════════════════════════════════
+
+const NODES = {
+  caller:     { x:  20, y: 370, w: 110, h: 78, label: 'Caller',            sub: 'PSTN',                          icon: 'phone' },
+  chimeVC:    { x: 160, y: 370, w: 130, h: 78, label: 'Chime Voice Conn.', sub: 'SIP trunk',                     icon: 'chime' },
+  sma:        { x: 160, y: 210, w: 130, h: 78, label: 'SMA Lambda',        sub: 'sma-handler',                   icon: 'lambda' },
+  nlb:        { x: 330, y: 290, w: 120, h: 78, label: 'Public NLB',        sub: '<b>TCP 5060 only</b> (r7)',     icon: 'elb' },
+  drachtio:   { x: 490, y: 290, w: 140, h: 78, label: 'drachtio-server',   sub: 'SIP · Sofia-SIP',               icon: 'fargate' },
+  rtpBridge:  { x: 490, y: 450, w: 140, h: 78, label: 'Node RTP Bridge',   sub: '<b>public IP :16000-48</b>',    icon: 'fargate' },
+  // AgentCore services — Nova Sonic, Runtime (middle, hub), Gateway.
+  novaSonic:  { x: 680, y: 290, w: 150, h: 78, label: 'Nova Sonic 2',      sub: 'Amazon Bedrock · bidi',         icon: 'bedrock' },
+  runtime:    { x: 680, y: 450, w: 150, h: 78, label: 'AgentCore Runtime', sub: 'Strands BidiAgent',             icon: 'agentcore' },
+  mcpGw:      { x: 680, y: 610, w: 150, h: 78, label: 'AgentCore Gateway', sub: 'MCP · AWS_IAM',                 icon: 'agentcore' },
+  // Data + Backend.
+  renderer:   { x: 870, y: 210, w: 140, h: 78, label: 'Prompt Renderer',   sub: 'Lambda + DDB + SSM',            icon: 'lambda' },
+  customers:  { x: 1030, y: 210, w: 140, h: 78, label: 'Customers DDB',    sub: 'PK=CUSTOMER#...',               icon: 'dynamodb' },
+  apiGw:      { x: 870, y: 450, w: 140, h: 78, label: 'API Gateway',       sub: 'REST · AWS_IAM',                icon: 'apigw' },
+  lambdas:    { x: 1030, y: 450, w: 140, h: 78, label: 'Backend Lambdas',  sub: '10 × GetMenu, Cart, …',          icon: 'lambda' },
+  ddbTables:  { x: 1030, y: 610, w: 140, h: 78, label: 'DynamoDB Tables',  sub: 'Menu · Orders · Locs',          icon: 'dynamodb' },
+};
+
+const CLUSTERS = [
+  { label: 'PSTN',              x:  10, y: 50, w: 130, h: 730, color: '#ff9f43' },
+  { label: 'Chime SDK Voice',   x: 145, y: 50, w: 155, h: 730, color: '#7cb8ff' },
+  { label: 'SIP Gateway (ECS)', x: 310, y: 50, w: 330, h: 730, color: '#34d399' },
+  { label: 'Amazon Bedrock AgentCore', x: 650, y: 50, w: 195, h: 730, color: '#d946ef' },
+  { label: 'Data + Backend',    x: 855, y: 50, w: 325, h: 730, color: '#a78bfa' },
+];
+
+// All the edges that exist in the system. Each step activates a subset.
+// Edges draw as dashed idle lines when inactive; animate with packets when active.
+const EDGES = [
+  // SIP signaling
+  { id: 'caller-chime',    from: 'caller',    to: 'chimeVC',   curve:   0, color: 'var(--sip)' },
+  { id: 'chime-caller',    from: 'chimeVC',   to: 'caller',    curve:  30, color: 'var(--audio-out)' },
+  { id: 'chime-sma',       from: 'chimeVC',   to: 'sma',       curve:   0, color: 'var(--ctrl)' },
+  { id: 'sma-chime',       from: 'sma',       to: 'chimeVC',   curve:   0, color: 'var(--ctrl)' },
+  { id: 'chime-nlb',       from: 'chimeVC',   to: 'nlb',       curve:   0, color: 'var(--sip)' },
+  { id: 'nlb-drachtio',    from: 'nlb',       to: 'drachtio',  curve:   0, color: 'var(--sip)' },
+  { id: 'drachtio-nlb',    from: 'drachtio',  to: 'nlb',       curve:  40, color: 'var(--sip)' },
+  { id: 'nlb-chime',       from: 'nlb',       to: 'chimeVC',   curve: -40, color: 'var(--sip)' },
+  // Direct RTP (r7 — bypasses NLB)
+  { id: 'chime-rtpbridge', from: 'chimeVC',   to: 'rtpBridge', curve:  80, color: 'var(--audio-in)' },
+  { id: 'rtpbridge-chime', from: 'rtpBridge', to: 'chimeVC',   curve: 120, color: 'var(--audio-out)' },
+  // Inside the task
+  { id: 'drachtio-bridge', from: 'drachtio',  to: 'rtpBridge', curve:   0, color: 'var(--ctrl)' },
+  // AgentCore
+  { id: 'bridge-runtime', from: 'rtpBridge', to: 'runtime',   curve: -20, color: 'var(--audio-in)' },
+  { id: 'runtime-bridge', from: 'runtime',   to: 'rtpBridge', curve:  40, color: 'var(--audio-out)' },
+  { id: 'runtime-nova',   from: 'runtime',   to: 'novaSonic', curve:   0, color: 'var(--audio-in)' },
+  { id: 'nova-runtime',   from: 'novaSonic', to: 'runtime',   curve:  30, color: 'var(--audio-out)' },
+  // Prompt renderer
+  { id: 'runtime-renderer',   from: 'runtime',  to: 'renderer',  curve:   0, color: 'var(--prompt)' },
+  { id: 'renderer-customers', from: 'renderer', to: 'customers', curve:   0, color: 'var(--db)' },
+  // MCP tools
+  { id: 'runtime-mcp', from: 'runtime', to: 'mcpGw',  curve:   0, color: 'var(--tool)' },
+  { id: 'mcp-api',     from: 'mcpGw',   to: 'apiGw',  curve:   0, color: 'var(--tool)' },
+  { id: 'api-lambdas', from: 'apiGw',   to: 'lambdas',curve:   0, color: 'var(--tool)' },
+  { id: 'lambdas-ddb', from: 'lambdas', to: 'ddbTables', curve: 0, color: 'var(--db)' },
+];
+
+// ═══════════════════════════════════════════════════════════════════
+// THE TUTORIAL SCRIPT — 15 steps. Each step activates specific nodes
+// and edges, fires packet animations, and shows a narration.
+// ═══════════════════════════════════════════════════════════════════
+
+const STEPS = [
+  {
+    title: 'The customer picks up the phone',
+    body: 'A hungry customer dials the restaurant\'s phone number (<code>+1 800 555 0100</code>). The call travels across the public phone network — the <span class="hl">PSTN</span>.',
+    meta: { Protocol: 'PSTN → SIP', Who: 'Caller' },
+    nodes: ['caller'],
+    edges: [],
+    packets: [],
+  },
+  {
+    title: 'AWS Chime answers the number',
+    body: 'The phone call reaches <span class="hl">Amazon Chime SDK Voice Connector</span>, the AWS service that owns our toll-free number. Chime now has to decide: what does this phone number do?',
+    meta: { Service: 'Amazon Chime SDK Voice Connector', Region: 'us-east-1' },
+    nodes: ['caller', 'chimeVC'],
+    edges: [{ edge: 'caller-chime', kind: 'sip' }],
+    packets: [{ edge: 'caller-chime', kind: 'sip', count: 2 }],
+  },
+  {
+    title: 'Chime triggers a Lambda: "what do I do?"',
+    body: 'Chime fires off our <span class="hl">SMA Lambda</span> — a tiny function that receives every new call event. Think of it as the "receptionist" that decides how to route the call.',
+    meta: { Function: 'sma-handler', Runtime: 'Node.js 24', Event: 'NEW_INBOUND_CALL' },
+    nodes: ['chimeVC', 'sma'],
+    edges: [{ edge: 'chime-sma', kind: 'ctrl' }],
+    packets: [{ edge: 'chime-sma', kind: 'ctrl', count: 1 }],
+  },
+  {
+    title: 'Lambda tells Chime: "bridge to our SIP gateway"',
+    body: 'The Lambda returns a <code>CallAndBridge</code> action that instructs Chime to forward the call to the SIP gateway. It hands Chime a SIP address (our NLB\'s public DNS).',
+    meta: { Action: 'CallAndBridge', Target: 'sip-gateway-nlb-xxxxxxxxxxxxxxxx.elb.amazonaws.com:5060' },
+    nodes: ['chimeVC', 'sma'],
+    edges: [{ edge: 'sma-chime', kind: 'ctrl' }],
+    packets: [{ edge: 'sma-chime', kind: 'ctrl', count: 1 }],
+  },
+  {
+    title: 'Chime sends a SIP INVITE',
+    body: 'Chime sends a <span class="hl">SIP INVITE</span> — the SIP message that initiates a voice call. It goes over TCP port 5060 to our <span class="hl">Public Network Load Balancer</span>, which forwards it to one of our Fargate tasks.',
+    meta: { Protocol: 'SIP/TCP:5060', From: '+12125550100', To: '+18005550100' },
+    nodes: ['chimeVC', 'nlb', 'drachtio'],
+    edges: [
+      { edge: 'chime-nlb', kind: 'sip' },
+      { edge: 'nlb-drachtio', kind: 'sip' },
+    ],
+    packets: [
+      { edge: 'chime-nlb', kind: 'sip', count: 1, delay: 0 },
+      { edge: 'nlb-drachtio', kind: 'sip', count: 1, delay: 300 },
+    ],
+  },
+  {
+    title: 'drachtio accepts the call, picks an RTP port',
+    body: 'Inside the Fargate container, <span class="hl">drachtio-server</span> (our SIP engine) accepts the INVITE. The Node bridge allocates a free UDP port from its pool (ports <code>16000</code>-<code>16048</code>) to receive the caller\'s voice.',
+    meta: { Container: 'drachtio-sip-gateway', PortPicked: '16003', PortRange: '16000-16048 (49 slots)' },
+    nodes: ['drachtio', 'rtpBridge'],
+    edges: [{ edge: 'drachtio-bridge', kind: 'ctrl' }],
+    packets: [{ edge: 'drachtio-bridge', kind: 'ctrl', count: 1 }],
+    badge: { node: 'rtpBridge', text: 'bound :16003' },
+  },
+  {
+    title: '200 OK: "send audio to my public IP, send SIP to the NLB"',
+    body: 'drachtio answers Chime with <code>200 OK</code>. The response has <b>two different addresses</b>, one per plane: the <span class="hl">SDP answer</span> says <code>c=IN IP4 &lt;task-public-ip&gt;</code> so Chime sends <b>media</b> direct to the task, while the <span class="hl">Contact header</span> advertises the <b>NLB\'s public IP</b> so Chime routes follow-up <b>signaling</b> (ACK, BYE, re-INVITE) through the load balancer. This two-IP split is what lets the task security group lock TCP/5060 to the NLB while still letting thousands of media flows land direct.',
+    meta: { 'SDP c= (media)': 'IN IP4 198.51.100.42', 'Contact (signaling)': 'sip:203.0.113.17:5060 (NLB EIP)', 'SDP m=': 'audio 16003 RTP/AVP 0 101' },
+    nodes: ['drachtio', 'nlb', 'chimeVC'],
+    edges: [
+      { edge: 'drachtio-nlb', kind: 'sip' },
+      { edge: 'nlb-chime', kind: 'sip' },
+    ],
+    packets: [
+      { edge: 'drachtio-nlb', kind: 'sip', count: 1, delay: 0 },
+      { edge: 'nlb-chime', kind: 'sip', count: 1, delay: 300 },
+    ],
+  },
+  {
+    title: 'Chime sends audio DIRECTLY to the container',
+    body: 'Chime now streams the caller\'s voice as <span class="hl">RTP packets</span> (50 per second, one every 20ms) straight to the task\'s public IP on UDP. <b>Under r7, the NLB handles only TCP/5060 signaling — RTP media flows directly to task public IPs, bypassing the load balancer</b> — this is what lets us scale to thousands of calls.',
+    meta: { Codec: 'G.711 μ-law (PCMU)', Rate: '50 packets/sec', 'Chime source CIDRs': 'see AWS Chime SDK VC docs' },
+    nodes: ['chimeVC', 'rtpBridge'],
+    edges: [{ edge: 'chime-rtpbridge', kind: 'audioIn' }],
+    packets: [{ edge: 'chime-rtpbridge', kind: 'audioIn', count: 8, delay: 0, spread: 1800 }],
+  },
+  {
+    title: 'Node bridge opens a signed WebSocket to AgentCore Runtime',
+    body: 'While audio is flowing, our Node app signs a URL with <span class="hl">AWS SigV4</span> and opens a WebSocket to <span class="hl">Amazon Bedrock AgentCore Runtime</span>. That Runtime is the container that hosts our Python <span class="hl">Strands BidiAgent</span>. The WebSocket is the only channel between the two — it carries caller audio up and agent audio down.',
+    meta: { Auth: 'AWS SigV4 query-string', URL: 'wss://<runtime-id>.bedrock-agentcore.us-east-1.amazonaws.com/ws', Upgrade: 'HTTPS → WSS' },
+    nodes: ['rtpBridge', 'runtime'],
+    edges: [
+      { edge: 'bridge-runtime', kind: 'ctrl' },
+    ],
+    packets: [
+      { edge: 'bridge-runtime', kind: 'ctrl', count: 2, delay: 0 },
+    ],
+  },
+  {
+    title: 'AgentCore looks up the caller',
+    body: 'Our <span class="hl">Prompt Renderer</span> Lambda takes the caller\'s phone number, hashes it with a secret pepper, and looks up the customer in <span class="hl">DynamoDB</span>. If found, it pulls their name and loyalty status. It also fetches the right system prompt from <span class="hl">SSM Parameter Store</span> (not shown on this diagram for clarity).',
+    meta: { Lambda: 'prompt-renderer', Hash: 'pstn-0000000000000000', LookupTime: '~100ms' },
+    nodes: ['runtime', 'renderer', 'customers'],
+    edges: [
+      { edge: 'runtime-renderer', kind: 'prompt' },
+      { edge: 'renderer-customers', kind: 'db' },
+    ],
+    packets: [
+      { edge: 'runtime-renderer', kind: 'prompt', count: 1, delay: 0 },
+      { edge: 'renderer-customers', kind: 'db', count: 1, delay: 300 },
+    ],
+  },
+  {
+    title: 'AgentCore Runtime starts a Nova Sonic 2 bidi stream',
+    body: 'Inside the Runtime, our Strands BidiAgent opens a <span class="hl">bidirectional streaming session</span> with <span class="hl">Nova Sonic 2</span>, Amazon\'s voice-to-voice AI. Both directions flow simultaneously — the model can listen and speak at the same time, like a real phone conversation.',
+    meta: { Model: 'amazon.nova-sonic-v2', Voice: 'tiffany', Protocol: 'InvokeModelWithBidirectionalStream' },
+    nodes: ['runtime', 'novaSonic'],
+    edges: [
+      { edge: 'runtime-nova', kind: 'ctrl' },
+      { edge: 'nova-runtime', kind: 'ctrl' },
+    ],
+    packets: [
+      { edge: 'runtime-nova', kind: 'ctrl', count: 1, delay: 0 },
+      { edge: 'nova-runtime', kind: 'ctrl', count: 1, delay: 350 },
+    ],
+  },
+  {
+    title: 'Caller speaks — audio flows UP the stack',
+    body: 'The customer talks. Their voice travels the full up-path: <span class="hl">phone → Chime → direct RTP to container → Node bridge → WebSocket → AgentCore Runtime → Nova Sonic</span>. Each hop takes milliseconds. Nova Sonic "hears" the caller in near-real-time.',
+    meta: { Latency: '~120ms end-to-end', 'Sample rate': '8 kHz μ-law → 16 kHz L16', Direction: 'UP' },
+    nodes: ['caller', 'chimeVC', 'rtpBridge', 'runtime', 'novaSonic'],
+    edges: [
+      { edge: 'caller-chime', kind: 'audioIn' },
+      { edge: 'chime-rtpbridge', kind: 'audioIn' },
+      { edge: 'bridge-runtime', kind: 'audioIn' },
+      { edge: 'runtime-nova', kind: 'audioIn' },
+    ],
+    packets: [
+      { edge: 'caller-chime', kind: 'audioIn', count: 3, delay: 0, spread: 1500 },
+      { edge: 'chime-rtpbridge', kind: 'audioIn', count: 3, delay: 100, spread: 1500 },
+      { edge: 'bridge-runtime', kind: 'audioIn', count: 3, delay: 200, spread: 1500 },
+      { edge: 'runtime-nova', kind: 'audioIn', count: 3, delay: 300, spread: 1500 },
+    ],
+  },
+  {
+    title: 'Nova Sonic asks the Runtime to use a tool',
+    body: 'Nova Sonic understands the caller asked about the menu. It emits a <span class="hl">tool_use</span> event back to the Runtime. Nova Sonic itself never talks to any tool — <b>the Runtime</b> is the one that calls the <span class="hl">AgentCore Gateway</span> on its behalf, using <span class="hl">MCP</span> (Model Context Protocol).',
+    meta: { 'Tool called': 'qsr-backend-api___GetMenu', Protocol: 'MCP (Model Context Protocol)', Transport: 'HTTP + AWS_IAM' },
+    nodes: ['novaSonic', 'runtime', 'mcpGw'],
+    edges: [
+      { edge: 'nova-runtime', kind: 'tool' },
+      { edge: 'runtime-mcp', kind: 'tool' },
+    ],
+    packets: [
+      { edge: 'nova-runtime', kind: 'tool', count: 1, delay: 0 },
+      { edge: 'runtime-mcp', kind: 'tool', count: 1, delay: 500 },
+    ],
+  },
+  {
+    title: 'MCP Gateway routes to the REST backend',
+    body: 'The <span class="hl">AgentCore MCP Gateway</span> translates the tool call into a REST request against our <span class="hl">API Gateway</span>, which invokes the <span class="hl">GetMenu Lambda</span>, which reads from <span class="hl">DynamoDB</span>. The full round-trip takes ~200ms.',
+    meta: { 'API endpoint': 'GET /menu?locationId=loc-…', 'DDB table': 'Menu', 'Round trip': '~200ms' },
+    nodes: ['mcpGw', 'apiGw', 'lambdas', 'ddbTables'],
+    edges: [
+      { edge: 'mcp-api', kind: 'tool' },
+      { edge: 'api-lambdas', kind: 'tool' },
+      { edge: 'lambdas-ddb', kind: 'db' },
+    ],
+    packets: [
+      { edge: 'mcp-api', kind: 'tool', count: 1, delay: 0 },
+      { edge: 'api-lambdas', kind: 'tool', count: 1, delay: 250 },
+      { edge: 'lambdas-ddb', kind: 'db', count: 1, delay: 500 },
+    ],
+  },
+  {
+    title: 'Nova Sonic speaks — audio flows DOWN',
+    body: 'Nova Sonic generates a natural voice response and streams it back through the same path in reverse: <span class="hl">Nova Sonic → AgentCore Runtime → WebSocket → Node bridge → direct RTP to Chime → caller\'s phone</span>. The customer hears a friendly human-like voice.',
+    meta: { Output: 'Amazon Nova Sonic 2 · tiffany voice', 'Sample rate': '16 kHz L16 → 8 kHz μ-law', Direction: 'DOWN' },
+    nodes: ['novaSonic', 'runtime', 'rtpBridge', 'chimeVC', 'caller'],
+    edges: [
+      { edge: 'nova-runtime', kind: 'audioOut' },
+      { edge: 'runtime-bridge', kind: 'audioOut' },
+      { edge: 'rtpbridge-chime', kind: 'audioOut' },
+      { edge: 'chime-caller', kind: 'audioOut' },
+    ],
+    packets: [
+      { edge: 'nova-runtime', kind: 'audioOut', count: 4, delay: 0, spread: 2000 },
+      { edge: 'runtime-bridge', kind: 'audioOut', count: 4, delay: 150, spread: 2000 },
+      { edge: 'rtpbridge-chime', kind: 'audioOut', count: 4, delay: 300, spread: 2000 },
+      { edge: 'chime-caller', kind: 'audioOut', count: 4, delay: 450, spread: 2000 },
+    ],
+  },
+];
+
+// ═══════════════════════════════════════════════════════════════════
+// ICONS — real AWS brand colors. Small, dense, readable at 28px.
+// ═══════════════════════════════════════════════════════════════════
+
+const ICONS = {
+  phone: `<svg viewBox="0 0 32 32"><rect x="2" y="2" width="28" height="28" rx="6" fill="#3b4966"/><path d="M10 8l3 3-2 2c.5 2 2 4 4 4l2-2 3 3-2 2c-.5 1.5-3.5 1.5-6 0-2.5-1.5-5.5-4.5-6-7 0-1 0-3.5 4-5z" fill="#fff"/></svg>`,
+  chime: `<svg viewBox="0 0 32 32"><rect x="2" y="2" width="28" height="28" rx="6" fill="#dd344c"/><circle cx="11" cy="16" r="2.5" fill="#fff"/><circle cx="16" cy="16" r="2.5" fill="#fff"/><circle cx="21" cy="16" r="2.5" fill="#fff"/></svg>`,
+  lambda: `<svg viewBox="0 0 32 32"><rect x="2" y="2" width="28" height="28" rx="6" fill="#ed7100"/><path d="M9 24h4l4-10 2 5h-2l-3 5h5l-5-12h-4L9 24z" fill="#fff"/></svg>`,
+  dynamodb: `<svg viewBox="0 0 32 32"><rect x="2" y="2" width="28" height="28" rx="6" fill="#4d72f3"/><ellipse cx="16" cy="9" rx="8" ry="2.5" fill="#fff" opacity=".85"/><path d="M8 9v14c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5V9" stroke="#fff" stroke-width="1.5" fill="none" opacity=".85"/><path d="M8 14.5c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5M8 20c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5" stroke="#fff" stroke-width="1.2" fill="none" opacity=".5"/></svg>`,
+  apigw: `<svg viewBox="0 0 32 32"><rect x="2" y="2" width="28" height="28" rx="6" fill="#e7157b"/><path d="M8 10l4 6-4 6M24 10l-4 6 4 6M14 8l-2 16M20 8l-2 16" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round"/></svg>`,
+  elb: `<svg viewBox="0 0 32 32"><rect x="2" y="2" width="28" height="28" rx="6" fill="#8c4fff"/><circle cx="16" cy="8" r="2" fill="#fff"/><circle cx="9" cy="22" r="2" fill="#fff"/><circle cx="16" cy="22" r="2" fill="#fff"/><circle cx="23" cy="22" r="2" fill="#fff"/><path d="M16 10v4M9 20l5-4 7 0 2 4" stroke="#fff" stroke-width="1.5" fill="none"/></svg>`,
+  fargate: `<svg viewBox="0 0 32 32"><rect x="2" y="2" width="28" height="28" rx="6" fill="#ed7100"/><rect x="7" y="9" width="18" height="14" rx="2" fill="none" stroke="#fff" stroke-width="1.6"/><path d="M10 14h12M10 18h12" stroke="#fff" stroke-width="1.2"/></svg>`,
+  bedrock: `<svg viewBox="0 0 32 32"><rect x="2" y="2" width="28" height="28" rx="6" fill="#01a88d"/><path d="M16 7l3 5 5 1-3.5 4 1 6-5.5-3-5.5 3 1-6L8 13l5-1z" fill="#fff"/></svg>`,
+  agentcore: `<svg viewBox="0 0 32 32"><rect x="2" y="2" width="28" height="28" rx="6" fill="#01a88d"/><path d="M16 6l7 4v8l-7 4-7-4v-8z" fill="none" stroke="#fff" stroke-width="1.6"/><circle cx="16" cy="15" r="2.5" fill="#fff"/></svg>`,
+  ssm: `<svg viewBox="0 0 32 32"><rect x="2" y="2" width="28" height="28" rx="6" fill="#dd344c"/><circle cx="16" cy="16" r="6" fill="none" stroke="#fff" stroke-width="1.6"/><path d="M16 8v3M16 21v3M8 16h3M21 16h3M10.5 10.5l2 2M19.5 19.5l2 2M10.5 21.5l2-2M19.5 12.5l2-2" stroke="#fff" stroke-width="1.5"/></svg>`,
+  location: `<svg viewBox="0 0 32 32"><rect x="2" y="2" width="28" height="28" rx="6" fill="#7aa116"/><path d="M16 8c-3.3 0-6 2.7-6 6 0 4.5 6 12 6 12s6-7.5 6-12c0-3.3-2.7-6-6-6z" fill="#fff"/><circle cx="16" cy="14" r="2.2" fill="#7aa116"/></svg>`,
+};
+
+// Accessible labels for each ICONS entry. Used by `renderIcon` to inject
+// role="img" + <title> into the SVG so screen readers announce a service
+// name instead of skipping the decorative graphic.
+const ICON_LABELS = {
+  phone: 'Phone caller',
+  chime: 'Amazon Chime SDK Voice Connector',
+  lambda: 'AWS Lambda',
+  dynamodb: 'Amazon DynamoDB',
+  apigw: 'Amazon API Gateway',
+  elb: 'Network Load Balancer',
+  fargate: 'AWS Fargate',
+  bedrock: 'Amazon Bedrock',
+  agentcore: 'Amazon Bedrock AgentCore',
+  ssm: 'AWS Systems Manager',
+  location: 'Amazon Location Service',
+};
+
+// Wrap an ICONS entry with role="img" and a <title> so the SVG announces
+// itself to assistive tech. Falls back to "icon" if no label is registered.
+function renderIcon(iconKey) {
+  const svg = ICONS[iconKey] || '';
+  if (!svg) return '';
+  const label = ICON_LABELS[iconKey] || 'icon';
+  return svg
+    .replace('<svg ', `<svg role="img" aria-label="${label}" `)
+    .replace('>', `><title>${label}</title>`);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Packet-color lookup, mapped from step's `kind` to CSS var.
+// ═══════════════════════════════════════════════════════════════════
+const PACKET_COLORS = {
+  sip:      'var(--sip)',
+  audioIn:  'var(--audio-in)',
+  audioOut: 'var(--audio-out)',
+  ctrl:     'var(--ctrl)',
+  tool:     'var(--tool)',
+  db:       'var(--db)',
+  prompt:   'var(--prompt)',
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// RENDERING — build the static topology once, then per-step updates
+// only change activation state.
+// ═══════════════════════════════════════════════════════════════════
+
+const svg = document.getElementById('svg');
+const clustersG = document.getElementById('clusters');
+const edgesBaseG = document.getElementById('edgesBase');
+const edgesHotG = document.getElementById('edgesHot');
+const packetsG = document.getElementById('packets');
+const nodeLayer = document.getElementById('nodeLayer');
+const tooltipEl = document.getElementById('tooltip');
+
+// Map: stage pixel coords, convert to viewport coords (we use viewBox-native)
+function nodeCenter(n) { return { x: n.x + n.w / 2, y: n.y + n.h / 2 }; }
+
+// Convert SVG viewBox coords to screen pixel coords for HTML overlay placement.
+function svgToScreen(x, y) {
+  const stage = document.getElementById('stage');
+  const rect = stage.getBoundingClientRect();
+  const vb = svg.viewBox.baseVal;
+  // maintain aspect ratio (xMidYMid meet)
+  const scale = Math.min(rect.width / vb.width, rect.height / vb.height);
+  const offX = (rect.width - vb.width * scale) / 2;
+  const offY = (rect.height - vb.height * scale) / 2;
+  return {
+    x: x * scale + offX,
+    y: y * scale + offY,
+    scale,
+  };
+}
+
+// Clusters
+for (const c of CLUSTERS) {
+  const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  rect.setAttribute('x', c.x); rect.setAttribute('y', c.y);
+  rect.setAttribute('width', c.w); rect.setAttribute('height', c.h);
+  rect.setAttribute('rx', 12);
+  rect.setAttribute('fill', c.color);
+  rect.setAttribute('fill-opacity', 0.04);
+  rect.setAttribute('stroke', c.color);
+  rect.setAttribute('stroke-opacity', 0.35);
+  rect.setAttribute('stroke-dasharray', '4 6');
+  rect.setAttribute('stroke-width', 1);
+  clustersG.appendChild(rect);
+
+  const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  label.setAttribute('x', c.x + 14);
+  label.setAttribute('y', c.y + 22);
+  label.setAttribute('class', 'cluster-label');
+  label.setAttribute('fill', c.color);
+  label.setAttribute('fill-opacity', 0.55);
+  label.textContent = c.label;
+  clustersG.appendChild(label);
+}
+
+// Compute SVG path `d` for an edge. `curve` controls vertical bow.
+function edgePath(from, to, curve) {
+  const a = nodeCenter(NODES[from]);
+  const b = nodeCenter(NODES[to]);
+  const mx = (a.x + b.x) / 2;
+  const my = (a.y + b.y) / 2 + curve;
+  return `M ${a.x} ${a.y} Q ${mx} ${my} ${b.x} ${b.y}`;
+}
+
+// Build edges. Each edge has a muted "base" line that's always visible
+// (so people can read the topology) and a "hot" line that pulses when
+// active. When a hot is on, we hide the base so they don't double up.
+const edgeHotElements = {};
+const edgeBaseElements = {};
+for (const e of EDGES) {
+  const d = edgePath(e.from, e.to, e.curve);
+  const base = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  base.setAttribute('d', d);
+  base.setAttribute('class', 'edge-base');
+  base.setAttribute('stroke', e.color);
+  base.setAttribute('id', `edge-base-${e.id}`);
+  base.style.color = e.color;
+  edgesBaseG.appendChild(base);
+  edgeBaseElements[e.id] = base;
+
+  const hot = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  hot.setAttribute('d', d);
+  hot.setAttribute('class', 'edge-hot');
+  hot.setAttribute('id', `edge-hot-${e.id}`);
+  hot.setAttribute('stroke', e.color);
+  hot.style.color = e.color;
+  hot.setAttribute('marker-end', 'url(#arrow)');
+  edgesHotG.appendChild(hot);
+  edgeHotElements[e.id] = hot;
+}
+
+// Build nodes (HTML overlays for the icon + label).
+const nodeElements = {};
+function renderNodes() {
+  nodeLayer.innerHTML = '';
+  for (const [key, n] of Object.entries(NODES)) {
+    const pos = svgToScreen(n.x + n.w / 2, n.y + n.h / 2);
+    const el = document.createElement('div');
+    el.className = 'node-box';
+    el.style.left = pos.x + 'px';
+    el.style.top = pos.y + 'px';
+    el.style.transform = 'translate(-50%, -50%)';
+    el.innerHTML = `
+      <div class="node-icon">${renderIcon(n.icon)}</div>
+      <div class="node-text">
+        <div class="node-title">${n.label}</div>
+        <div class="node-sub">${n.sub}</div>
+      </div>
+    `;
+    el.addEventListener('mouseenter', (ev) => showTooltip(ev, key, n));
+    el.addEventListener('mousemove', (ev) => moveTooltip(ev));
+    el.addEventListener('mouseleave', () => hideTooltip());
+    nodeLayer.appendChild(el);
+    nodeElements[key] = el;
+  }
+}
+
+function showTooltip(ev, key, node) {
+  tooltipEl.innerHTML = `<div class="tooltip-title">${node.label}</div><div>${node.sub.replace(/<[^>]*>/g, '')}</div>`;
+  tooltipEl.classList.add('show');
+  moveTooltip(ev);
+}
+function moveTooltip(ev) {
+  tooltipEl.style.left = (ev.clientX + 14) + 'px';
+  tooltipEl.style.top = (ev.clientY + 14) + 'px';
+}
+function hideTooltip() { tooltipEl.classList.remove('show'); }
+
+// ═══════════════════════════════════════════════════════════════════
+// Packet animation — small glowing dot traverses an edge's path.
+// ═══════════════════════════════════════════════════════════════════
+
+function firePacket(edgeId, kindColor, durationMs) {
+  const pathEl = edgeHotElements[edgeId];
+  if (!pathEl) return;
+  const pathD = pathEl.getAttribute('d');
+
+  // Create a hidden measure path so we can use getPointAtLength.
+  const measure = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  measure.setAttribute('d', pathD);
+  measure.style.visibility = 'hidden';
+  svg.appendChild(measure);
+  const total = measure.getTotalLength();
+
+  const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  dot.setAttribute('r', 5);
+  dot.setAttribute('fill', kindColor);
+  dot.setAttribute('class', 'packet');
+  dot.style.color = kindColor;
+  packetsG.appendChild(dot);
+
+  const start = performance.now();
+  function tick(now) {
+    const t = Math.min(1, (now - start) / durationMs);
+    const p = measure.getPointAtLength(t * total);
+    dot.setAttribute('cx', p.x);
+    dot.setAttribute('cy', p.y);
+    if (t < 1) requestAnimationFrame(tick);
+    else {
+      dot.remove();
+      measure.remove();
+    }
+  }
+  requestAnimationFrame(tick);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Step application
+// ═══════════════════════════════════════════════════════════════════
+
+let currentStep = -1;
+let autoPlayTimer = null;
+let autoPlaying = false;
+const AUTOPLAY_MS = 3500;
+
+function applyStep(idx) {
+  currentStep = idx;
+  const step = STEPS[idx];
+
+  // Update sidebar text
+  document.getElementById('stepCounter').textContent = `STEP ${idx + 1} OF ${STEPS.length}`;
+  document.getElementById('stepTitle').textContent = step.title;
+  document.getElementById('stepBody').innerHTML = step.body;
+
+  const metaEl = document.getElementById('stepMeta');
+  metaEl.innerHTML = Object.entries(step.meta || {})
+    .map(([k, v]) => `<span class="k">${k}</span> <span class="v">${v}</span>`)
+    .join('<br/>');
+
+  document.getElementById('progressInner').style.width = ((idx + 1) / STEPS.length * 100) + '%';
+
+  // Update step list active state + auto-scroll active row into view.
+  let activeRow = null;
+  for (const row of document.querySelectorAll('.step-row')) {
+    const rowIdx = Number(row.dataset.idx);
+    row.classList.toggle('active', rowIdx === idx);
+    row.classList.toggle('done', rowIdx < idx);
+    if (rowIdx === idx) activeRow = row;
+  }
+  if (activeRow) {
+    activeRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  // Update node activation
+  const activeSet = new Set(step.nodes);
+  for (const [key, el] of Object.entries(nodeElements)) {
+    el.classList.toggle('active', activeSet.has(key));
+  }
+
+  // Update edge activation (hot lines + hide base under them)
+  const activeEdges = new Set((step.edges || []).map((e) => e.edge));
+  for (const [id, el] of Object.entries(edgeHotElements)) {
+    el.classList.toggle('on', activeEdges.has(id));
+  }
+  for (const [id, el] of Object.entries(edgeBaseElements)) {
+    el.classList.toggle('live', activeEdges.has(id));
+  }
+
+  // Fire packets. Stagger based on their `delay` and `spread` hints.
+  for (const p of step.packets || []) {
+    const count = p.count || 1;
+    const spread = p.spread || 0;
+    const baseDelay = p.delay || 0;
+    const dur = 1200;
+    for (let i = 0; i < count; i++) {
+      setTimeout(() => firePacket(p.edge, PACKET_COLORS[p.kind] || '#fff', dur),
+        baseDelay + (i * (spread / Math.max(1, count))));
+    }
+  }
+
+  // Button state
+  document.getElementById('prevStep').disabled = (idx === 0);
+  document.getElementById('nextStep').disabled = (idx === STEPS.length - 1);
+}
+
+function buildStepsList() {
+  const list = document.getElementById('stepsList');
+  list.innerHTML = '';
+  STEPS.forEach((s, i) => {
+    const row = document.createElement('div');
+    row.className = 'step-row';
+    row.dataset.idx = i;
+    row.innerHTML = `<div class="step-row-num">${String(i + 1).padStart(2, '0')}</div><div>${s.title}</div>`;
+    row.addEventListener('click', () => { stopAutoPlay(); applyStep(i); });
+    list.appendChild(row);
+  });
+}
+
+function startAutoPlay() {
+  autoPlaying = true;
+  document.getElementById('autoPlay').innerHTML = 'Pause';
+  // Advance immediately on click so the user sees action right away,
+  // then continue stepping forward every AUTOPLAY_MS.
+  if (currentStep < STEPS.length - 1) {
+    applyStep(currentStep + 1);
+  }
+  autoPlayTimer = setInterval(() => {
+    if (currentStep >= STEPS.length - 1) {
+      stopAutoPlay();
+      return;
+    }
+    applyStep(currentStep + 1);
+  }, AUTOPLAY_MS);
+}
+function stopAutoPlay() {
+  autoPlaying = false;
+  document.getElementById('autoPlay').innerHTML = 'Auto-play';
+  if (autoPlayTimer) { clearInterval(autoPlayTimer); autoPlayTimer = null; }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Wire up controls
+// ═══════════════════════════════════════════════════════════════════
+
+document.getElementById('prevStep').addEventListener('click', () => {
+  stopAutoPlay();
+  if (currentStep > 0) applyStep(currentStep - 1);
+});
+document.getElementById('nextStep').addEventListener('click', () => {
+  stopAutoPlay();
+  if (currentStep < STEPS.length - 1) applyStep(currentStep + 1);
+});
+document.getElementById('jumpStart').addEventListener('click', () => { stopAutoPlay(); applyStep(0); });
+document.getElementById('jumpEnd').addEventListener('click', () => { stopAutoPlay(); applyStep(STEPS.length - 1); });
+document.getElementById('restart').addEventListener('click', () => { stopAutoPlay(); applyStep(0); });
+document.getElementById('autoPlay').addEventListener('click', () => {
+  if (autoPlaying) stopAutoPlay();
+  else {
+    if (currentStep >= STEPS.length - 1) applyStep(0);
+    startAutoPlay();
+  }
+});
+
+window.addEventListener('keydown', (ev) => {
+  if (ev.key === 'ArrowRight' || ev.key === ' ') {
+    ev.preventDefault();
+    stopAutoPlay();
+    if (currentStep < STEPS.length - 1) applyStep(currentStep + 1);
+  } else if (ev.key === 'ArrowLeft') {
+    ev.preventDefault();
+    stopAutoPlay();
+    if (currentStep > 0) applyStep(currentStep - 1);
+  }
+});
+
+window.addEventListener('resize', () => renderNodes());
+
+// Initial render
+renderNodes();
+buildStepsList();
+applyStep(0);
+</script>
+</body>
+</html>

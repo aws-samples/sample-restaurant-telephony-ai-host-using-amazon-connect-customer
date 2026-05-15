@@ -1,0 +1,29 @@
+# Telephony Voice Ordering Agent — runtime dependencies (r6).
+#
+# r6 dropped: aiortc, av, ebmlite, audioop-lts, pyaudio, prompt_toolkit.
+# All μ-law ↔ L16 + 8 kHz ↔ 16 kHz resampling is done by FreeSWITCH's
+# mod_audio_stream now; the agent sees raw L16 16 kHz on the WebSocket
+# and never touches the codec path.
+#
+# CodeBuild regenerates `requirements.lock` on REGENERATE_LOCK=1 (task 4.4
+# optional) to pin the full transitive tree per NFR3 / P8.
+
+fastapi==0.123.9
+uvicorn[standard]>=0.31.1
+boto3>=1.35.0
+
+# Strands Agents — bidirectional streaming variant (BidiAgent + Nova Sonic).
+strands-agents[bidi]==1.37.0
+
+# MCP client for dynamic tool discovery from AgentCore Gateway with
+# AWS IAM (SigV4) authentication.
+mcp>=1.23.0
+pydantic>=2.4
+mcp-proxy-for-aws @ git+https://github.com/aws/mcp-proxy-for-aws.git@v1.1.5
+
+# Test deps — kept alongside runtime deps so a single `pip install -r`
+# populates both dev and prod needs.  Overhead is acceptable vs splitting.
+pytest>=8
+pytest-asyncio>=0.24
+hypothesis>=6.100
+httpx>=0.27
