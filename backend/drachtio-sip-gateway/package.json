@@ -1,0 +1,22 @@
+{
+  "name": "drachtio-sip-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Node.js call-control for the drachtio + rtpengine SIP gateway that bridges Chime Voice Connector inbound calls to the Bedrock AgentCore Runtime WebSocket.",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test tests/"
+  },
+  "dependencies": {
+    "alawmulaw": "6.0.0",
+    "drachtio-srf": "5.0.22",
+    "rtpengine-client": "0.4.12",
+    "ws": "8.18.0"
+  },
+  "license": "MIT-0"
+}

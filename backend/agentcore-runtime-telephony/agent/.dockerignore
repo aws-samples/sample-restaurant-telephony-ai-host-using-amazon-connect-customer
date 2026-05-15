@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Tests + docs (not needed in the runtime image)
+tests/
+README.md
+NOTICE.md
+
+# Logs
+*.log
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Local env
+.env
+.env.local

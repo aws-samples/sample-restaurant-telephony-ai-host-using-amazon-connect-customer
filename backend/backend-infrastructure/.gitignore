@@ -1,0 +1,34 @@
+# CDK
+*.js
+!jest.config.js
+!lambda/**/*.js
+*.d.ts
+node_modules
+cdk.out
+.cdk.staging
+
+# TypeScript
+dist/
+*.tsbuildinfo
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

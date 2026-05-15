@@ -1,0 +1,7 @@
+node_modules/
+cdk.out/
+cdk.context.json
+*.tsbuildinfo
+*.d.ts
+*.js
+!bin/cdk.ts
