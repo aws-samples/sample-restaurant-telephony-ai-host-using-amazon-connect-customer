@@ -356,6 +356,69 @@ fi
 print_info "Bedrock AgentCore-supported AZs in this account: $AGENTCORE_AZS"
 
 ################################################################################
+# Auto-heal: remove orphan dev-prefix log groups + stuck CFN stacks before
+# the deploy starts. Per working agreement #9: scripts must auto-heal where
+# possible. The two recurring failure modes this addresses:
+#
+#   1. CloudWatch log groups for Lambda/CodeBuild/ECS/API Gateway are created
+#      by AWS at first invocation, NOT by CDK. After a `cdk destroy` they
+#      survive as orphans. The next `cdk deploy` then fails with
+#      "Resource of type AWS::Logs::LogGroup ... already exists" because
+#      CFN can't claim ownership of an existing resource it didn't create.
+#      Fix: delete every orphan log group whose name starts with the project
+#      prefix BEFORE `cdk deploy` runs.
+#
+#   2. CFN stacks left in REVIEW_IN_PROGRESS / ROLLBACK_COMPLETE from a
+#      prior failed deploy block re-creation. CFN refuses `update-stack`
+#      on those statuses; the stack must be deleted first.
+#      Fix: scan project-known stack names and delete any in those states.
+################################################################################
+preflight_log_group_sweep() {
+  local prefix="$1"
+  local lgs
+  # Patterns covering every project-owned log namespace.
+  lgs=$(aws logs describe-log-groups --region us-east-1 \
+    --query "logGroups[?starts_with(logGroupName, '/aws/lambda/${prefix}-') \
+      || starts_with(logGroupName, '/aws/codebuild/${prefix}-') \
+      || starts_with(logGroupName, '/ecs/${prefix}-') \
+      || starts_with(logGroupName, '/aws/apigateway/${prefix}-')].logGroupName" \
+    --output text 2>/dev/null || true)
+  if [ -z "$lgs" ]; then
+    print_info "Auto-heal: no orphan log groups for prefix '${prefix}'"
+    return 0
+  fi
+  print_warning "Auto-heal: found orphan log groups for prefix '${prefix}', deleting..."
+  for lg in $lgs; do
+    if aws logs delete-log-group --region us-east-1 --log-group-name "$lg" 2>/dev/null; then
+      echo "    deleted: $lg"
+    else
+      echo "    skipped (delete failed): $lg"
+    fi
+  done
+}
+
+preflight_stuck_stack_sweep() {
+  local stuck_statuses="REVIEW_IN_PROGRESS ROLLBACK_COMPLETE"
+  local project_stacks="DynamoDBStack LocationStack LambdaStack ApiGatewayStack \
+    AgentCoreGatewayStack NetworkStack AgentEcrStack AgentBuildStack \
+    AgentRuntimeStack SipGatewayStack IngressNumberStack IngressStack"
+  for stack in $project_stacks; do
+    local status
+    status=$(aws cloudformation describe-stacks --region us-east-1 \
+      --stack-name "$stack" --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "")
+    if echo "$stuck_statuses" | grep -qw "$status"; then
+      print_warning "Auto-heal: stack '$stack' is in $status, deleting..."
+      aws cloudformation delete-stack --region us-east-1 --stack-name "$stack" 2>/dev/null || true
+      aws cloudformation wait stack-delete-complete --region us-east-1 --stack-name "$stack" 2>/dev/null || true
+    fi
+  done
+}
+
+print_section "Pre-deploy auto-heal sweep"
+preflight_stuck_stack_sweep
+preflight_log_group_sweep "$PROJECT_PREFIX"
+
+################################################################################
 # Resolve an available Chime phone-number search spec for Layer 10a
 # (IngressNumberStack). Skipped entirely if the number is already
 # deployed (state says true) — the persistent number does not need
