@@ -415,10 +415,11 @@ export class AgentRuntimeStack extends cdk.Stack {
         ],
         resources: [
           // Scoped to the Nova Sonic model family in the deployment region.
-          // Cross-region wildcard removed in security-review pass — agent
-          // only invokes Nova Sonic 2 (`amazon.nova-sonic-*`) in the same
-          // region as the AgentCore Runtime container.
-          cdk.Fn.sub('arn:aws:bedrock:${R}::foundation-model/amazon.nova-sonic-*', {
+          // The real Nova Sonic model id is `amazon.nova-2-sonic-v1:0` (note
+          // the "2-" infix); use a broader `amazon.nova-*sonic*` pattern so
+          // future generations of the same model family are covered without
+          // re-deploys, while still excluding non-Sonic Nova models.
+          cdk.Fn.sub('arn:aws:bedrock:${R}::foundation-model/amazon.nova-*sonic*', {
             R: cdk.Aws.REGION,
           }),
           cdk.Fn.sub('arn:aws:bedrock:${R}:${A}:*', {
@@ -580,7 +581,7 @@ export class AgentRuntimeStack extends cdk.Stack {
         {
           id: 'AwsSolutions-IAM5',
           reason:
-            'Residual wildcards on the r6-trimmed role: (a) ecr:GetAuthorizationToken is account-scoped by AWS — no resource-level IAM; (b) xray:* and cloudwatch:PutMetricData are service-scoped, not resource-scoped (PutMetricData is further conditioned on `cloudwatch:namespace` = `bedrock-agentcore`); (c) bedrock:InvokeModel* is now scoped to `arn:aws:bedrock:${region}::foundation-model/amazon.nova-sonic-*` — the Nova Sonic model family in the deployment region only. All r5 Kinesis Video Streams + Chime SMA + S3 playback grants removed in r6.',
+            'Residual wildcards on the r6-trimmed role: (a) ecr:GetAuthorizationToken is account-scoped by AWS — no resource-level IAM; (b) xray:* and cloudwatch:PutMetricData are service-scoped, not resource-scoped (PutMetricData is further conditioned on `cloudwatch:namespace` = `bedrock-agentcore`); (c) bedrock:InvokeModel* is now scoped to `arn:aws:bedrock:${region}::foundation-model/amazon.nova-*sonic*` — the Nova Sonic model family in the deployment region only. All r5 Kinesis Video Streams + Chime SMA + S3 playback grants removed in r6.',
         },
       ],
       true,
