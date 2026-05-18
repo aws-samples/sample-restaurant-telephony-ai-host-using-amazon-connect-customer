@@ -31,10 +31,16 @@
 #                             when --skip-ddb is also set since otherwise
 #                             the table itself is going to be destroyed)
 #   --include-number          Also destroy tel-ingress-number (RELEASES the
-#                             provisioned Chime phone number back to the pool
-#                             — excluded by default so iterative cleanup
-#                             preserves the number). Dangerous: the number
-#                             cannot be recovered once released.
+#                             provisioned Chime phone number back to the pool).
+#                             This is the default — see --preserve-number to
+#                             opt out and keep the number across cleanups.
+#   --preserve-number         Skip tel-ingress-number cleanup (keeps the Chime
+#                             phone number across iterations). Useful when
+#                             you want to retain the same dialable number
+#                             through multiple deploy/cleanup cycles.
+#                             Note: releasing the number (the default) is
+#                             irreversible — the same E.164 cannot be
+#                             recovered once Chime returns it to the pool.
 #   --ignore-missing-resources  Continue even if stacks don't exist
 #   --force                   Skip confirmation prompts
 #   --dry-run                 Preview what would be deleted
@@ -59,6 +65,24 @@ OUTPUTS_DIR="cdk-outputs"
 SKIP_INGRESS=false
 SKIP_SIP_GATEWAY=false
 SKIP_AGENT_RUNTIME=false
+# Project prefix for orphan resource sweeps. Read from .deployment-state.json
+# if available, fall back to "dev" matching deploy-all.sh's default. Operators
+# who deployed with a different prefix should pass --deploymentPrefix.
+PROJECT_PREFIX="dev"
+if [ -f .deployment-state.json ]; then
+  state_prefix=$(node -e "
+    try {
+      const d = JSON.parse(require('fs').readFileSync('.deployment-state.json','utf8'));
+      const c = d.components || {};
+      const first = Object.values(c).find(v => v && v.prefix);
+      if (first && first.prefix) console.log(first.prefix);
+    } catch (e) {}
+  " 2>/dev/null || true)
+  if [ -n "$state_prefix" ]; then
+    PROJECT_PREFIX="$state_prefix"
+  fi
+fi
+
 SKIP_AGENT_BUILD=false
 SKIP_AGENT_ECR=false
 SKIP_NETWORK=false
@@ -71,9 +95,11 @@ SKIP_DDB=false
 # By default we run cleanup-data.js --force before dropping the tables
 # so re-running deploy-all.sh --with-synthetic-data later starts clean.
 SKIP_SYNTHETIC_DATA=false
-# Default: retain the Chime phone number across cleanups. Opt in via
-# --include-number to release it back to the pool.
-INCLUDE_NUMBER=false
+# Default: release the Chime phone number along with the rest of the
+# stack. End-to-end test cycles need to delete everything; operators who
+# want to retain the number across iterations can opt out via
+# --preserve-number.
+INCLUDE_NUMBER=true
 IGNORE_MISSING=true
 FORCE=false
 DRY_RUN=false
@@ -94,6 +120,8 @@ while [[ $# -gt 0 ]]; do
     --skip-ddb)                SKIP_DDB=true;            shift ;;
     --skip-synthetic-data)     SKIP_SYNTHETIC_DATA=true; shift ;;
     --include-number)          INCLUDE_NUMBER=true;      shift ;;
+    --preserve-number)         INCLUDE_NUMBER=false;     shift ;;
+    --deploymentPrefix)        PROJECT_PREFIX="$2";      shift 2 ;;
     --ignore-missing-resources) IGNORE_MISSING=true; CONTINUE_ON_ERROR=true; shift ;;
     --force)                   FORCE=true;               shift ;;
     --dry-run)                 DRY_RUN=true;             shift ;;
@@ -160,7 +188,7 @@ if [ "$FORCE" != true ] && [ "$DRY_RUN" != true ]; then
   if [ "$INCLUDE_NUMBER" = true ]; then
     echo "  - IngressNumberStack      (⚠️  RELEASES the Chime phone number — not recoverable)"
   else
-    echo "  - IngressNumberStack      (SKIPPED by default — pass --include-number to also destroy)"
+    echo "  - IngressNumberStack      (SKIPPED — pass --include-number to also destroy, or default to release)"
   fi
   echo "  - SipGatewayStack         (drachtio Fargate cluster + NLB + CodeBuild + ECR)"
   echo "  - AgentRuntimeStack       (AgentCore Runtime, pepper SSM)"
@@ -184,6 +212,36 @@ fi
 
 init_state
 
+# ───────────── Resolve Bedrock AgentCore-supported AZs ─────────────
+#
+# `backend/network/lib/network-stack.ts` requires the `agentcoreAzs` CDK
+# context key to synthesize, AND `cdk destroy` runs synthesis first. So
+# we mirror the AZ resolution from deploy-all.sh here. If the AWS call
+# fails (e.g. expired creds, network blip), we fall back to a sensible
+# pair of letter values — the value is not actually consumed at destroy
+# time, it only has to satisfy synth-time validation.
+BEDROCK_SUPPORTED_AZ_IDS="use1-az1 use1-az2 use1-az4"
+AGENTCORE_AZS=$(aws ec2 describe-availability-zones \
+  --region us-east-1 \
+  --filters Name=zone-type,Values=availability-zone \
+  --query 'AvailabilityZones[].[ZoneName,ZoneId]' \
+  --output text 2>/dev/null \
+  | awk -v supported="$BEDROCK_SUPPORTED_AZ_IDS" '
+      BEGIN { split(supported, arr, " "); for (i in arr) s[arr[i]] = 1; n = 0 }
+      { if ($2 in s && n < 2) { if (n > 0) printf ","; printf "%s", $1; n++ } }
+      END { print "" }
+    ')
+if [ -z "$AGENTCORE_AZS" ] || [ "$(echo "$AGENTCORE_AZS" | tr ',' '\n' | wc -l)" -lt 2 ]; then
+  print_warning "Could not resolve AZ mapping from AWS; using fallback us-east-1a,us-east-1b for synth-only context"
+  AGENTCORE_AZS="us-east-1a,us-east-1b"
+fi
+
+# Chime phone-number search spec — IngressNumberStack also throws at synth
+# time without one. The values are not consumed during destroy; pass any
+# valid pair so synth completes.
+CHIME_SEARCH_KIND="${CHIME_SEARCH_KIND:-toll-free}"
+CHIME_SEARCH_VALUE="${CHIME_SEARCH_VALUE:-833}"
+
 print_info "Starting cleanup in reverse DAG order..."
 echo ""
 OVERALL_SUCCESS=true
@@ -197,11 +255,17 @@ OVERALL_SUCCESS=true
 #   $2 = CDK construct id (UN-prefixed; matches bin/cdk.ts)
 #   $3 = cdk-outputs/<file>.json basename
 #   $4 = component key for .deployment-state.json
+#   $5 = optional extra cdk flags (space-separated, e.g. "--context k=v")
+#        Some stacks throw at synth time if a required CfnParameter or
+#        Context key is missing — even on `cdk destroy` (synth runs first).
+#        Pass dummy-but-valid values here so destroy can proceed; the
+#        physical resources are deleted by stack name regardless.
 destroy_stack() {
   local cdk_dir=$1
   local stack_id=$2
   local outputs_file=$3
   local component_key=$4
+  local extra_flags=${5:-}
   local destroy_flags=""
 
   if [ "$FORCE" = true ]; then
@@ -218,7 +282,7 @@ destroy_stack() {
     cd "$WORKSPACE_ROOT/$cdk_dir"
     safe_npm_install
     # shellcheck disable=SC2086
-    npx cdk destroy $destroy_flags "$stack_id"
+    npx cdk destroy $destroy_flags $extra_flags "$stack_id"
   )
   local ec=$?
   if [ $ec -eq 0 ]; then
@@ -282,22 +346,23 @@ else
   print_warning "Skipping Ingress cleanup"
 fi
 
-# Step 1b: IngressNumber — only if the operator opted in. Retaining the
-# number by default protects against accidentally losing the provisioned
-# phone number when iterating on plumbing.
+# Step 1b: IngressNumber — released by default. Use --preserve-number to
+# retain the number across cleanups (useful when iterating on plumbing
+# without losing the same dialable E.164).
 if [ "$INCLUDE_NUMBER" = true ]; then
-  print_section "Step 1b: Destroying IngressNumberStack (operator opted in via --include-number)"
+  print_section "Step 1b: Destroying IngressNumberStack (releases the Chime phone number)"
   if [ "$(is_deployed tel-ingress-number)" = "true" ] || [ "$IGNORE_MISSING" = true ]; then
     destroy_stack \
       "telephony-interface/telephony-number/cdk" \
       "IngressNumberStack" \
       "tel-ingress-number.json" \
-      "tel-ingress-number"
+      "tel-ingress-number" \
+      "--context chimePhoneSearchKind=${CHIME_SEARCH_KIND} --context chimePhoneSearchValue=${CHIME_SEARCH_VALUE}"
   else
     print_info "tel-ingress-number not deployed; skipping"
   fi
 else
-  print_info "Retaining IngressNumberStack (Chime phone number). Pass --include-number to release."
+  print_info "Retaining IngressNumberStack (Chime phone number) — --preserve-number was passed."
 fi
 
 # Step 1c: SipGatewayStack — r6 insertion. Must be destroyed before
@@ -376,7 +441,8 @@ if [ "$SKIP_NETWORK" = false ]; then
       "backend/network" \
       "NetworkStack" \
       "tel-network.json" \
-      "tel-network"
+      "tel-network" \
+      "--context agentcoreAzs=${AGENTCORE_AZS}"
   else
     print_info "tel-network not deployed; skipping"
   fi
@@ -473,7 +539,7 @@ if [ "$DRY_RUN" = false ] && [ "$OVERALL_SUCCESS" = true ] && [ -f "$STATE_FILE_
     rm -f "$STATE_FILE_ABS"
     print_info "Removed deployment state file"
   else
-    print_info "Preserving deployment state file — IngressNumberStack is retained. Pass --include-number next time to fully tear down."
+    print_info "Preserving deployment state file — IngressNumberStack is retained. Re-run without --preserve-number to fully tear down."
   fi
 elif [ "$DRY_RUN" = false ] && [ "$OVERALL_SUCCESS" = false ]; then
   print_warning "State file preserved — re-run cleanup to finish remaining components"
@@ -493,6 +559,36 @@ if [ "$DRY_RUN" = true ]; then
   echo ""
   print_info "Run without --dry-run to actually delete resources"
 elif [ "$OVERALL_SUCCESS" = true ]; then
+  # ───────────── Post-cleanup auto-heal sweep ─────────────
+  # Per working agreement #9: clean up the orphan artifacts that survive
+  # `cdk destroy` so the NEXT deploy doesn't trip over them.
+  PROJECT_PREFIX="${PROJECT_PREFIX:-dev}"
+
+  # 1. Orphan log groups (Lambda/CodeBuild/ECS/API Gateway create these
+  #    lazily at first invocation; CDK never owned them, never deletes
+  #    them).
+  print_info "Auto-heal: sweeping orphan log groups under prefix '${PROJECT_PREFIX}'..."
+  ORPHAN_LGS=$(aws logs describe-log-groups --region us-east-1 \
+    --query "logGroups[?starts_with(logGroupName, '/aws/lambda/${PROJECT_PREFIX}-') \
+      || starts_with(logGroupName, '/aws/codebuild/${PROJECT_PREFIX}-') \
+      || starts_with(logGroupName, '/ecs/${PROJECT_PREFIX}-') \
+      || starts_with(logGroupName, '/aws/apigateway/${PROJECT_PREFIX}-')].logGroupName" \
+    --output text 2>/dev/null || true)
+  if [ -n "$ORPHAN_LGS" ]; then
+    for lg in $ORPHAN_LGS; do
+      aws logs delete-log-group --region us-east-1 --log-group-name "$lg" 2>/dev/null || true
+      echo "  deleted: $lg"
+    done
+  fi
+
+  # 2. Synthetic-data output JSONs (gitignored, but still pollute the
+  #    working tree; the synthetic-data layer regenerates them on the
+  #    next deploy anyway).
+  if [ -d "$WORKSPACE_ROOT/backend/synthetic-data/output" ]; then
+    rm -f "$WORKSPACE_ROOT/backend/synthetic-data/output/"*.json 2>/dev/null || true
+    print_info "Auto-heal: removed stale synthetic-data output JSONs"
+  fi
+
   print_success "All telephony stacks cleaned up"
 else
   print_warning "Some stacks may not have been cleaned up. Check the errors above."
