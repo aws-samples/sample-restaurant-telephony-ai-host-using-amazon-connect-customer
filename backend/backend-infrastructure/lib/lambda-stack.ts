@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as path from 'path';
 import { Construct } from 'constructs';
 import { NagSuppressions } from 'cdk-nag';
@@ -158,6 +159,23 @@ export class LambdaStack extends cdk.Stack {
         ],
       });
 
+    // Helper to pre-create the CloudWatch log group each Lambda writes to.
+    //
+    // Why explicit: when a Lambda is invoked for the first time, AWS lazily
+    // creates `/aws/lambda/<functionName>` if it does not already exist.
+    // CDK never owned that log group, so `cdk destroy` cannot delete it.
+    // The next deploy then fails with `Resource of type AWS::Logs::LogGroup
+    // ... already exists` because CFN refuses to claim ownership of an
+    // existing resource. Pre-creating the log group through CDK with
+    // `RemovalPolicy.DESTROY` makes the lifecycle symmetric: CFN creates
+    // it on deploy, deletes it on destroy, no orphans.
+    const makeLogGroup = (logicalId: string, functionSuffix: string) =>
+      new logs.LogGroup(this, logicalId, {
+        logGroupName: cdk.Fn.sub(`/aws/lambda/\${P}-${functionSuffix}`, { P: prefix }),
+        retention: logs.RetentionDays.ONE_MONTH,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      });
+
     // ───────────── 10 Lambdas ─────────────
     const getCustomerProfileRole = makeRole(
       'GetCustomerProfileRole',
@@ -171,6 +189,7 @@ export class LambdaStack extends cdk.Stack {
         path.join(__dirname, '../lambda/get-customer-profile'),
       ),
       role: getCustomerProfileRole,
+      logGroup: makeLogGroup('GetCustomerProfileLogGroup', 'GetCustomerProfile'),
       environment: {
         CUSTOMERS_TABLE_NAME: customersTableNameParam.valueAsString,
       },
@@ -193,6 +212,7 @@ export class LambdaStack extends cdk.Stack {
         path.join(__dirname, '../lambda/get-previous-orders'),
       ),
       role: getPreviousOrdersRole,
+      logGroup: makeLogGroup('GetPreviousOrdersLogGroup', 'GetPreviousOrders'),
       environment: {
         ORDERS_TABLE_NAME: ordersTableNameParam.valueAsString,
       },
@@ -210,6 +230,7 @@ export class LambdaStack extends cdk.Stack {
       handler: 'index.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/get-menu')),
       role: getMenuRole,
+      logGroup: makeLogGroup('GetMenuLogGroup', 'GetMenu'),
       environment: {
         MENU_TABLE_NAME: menuTableNameParam.valueAsString,
       },
@@ -226,6 +247,7 @@ export class LambdaStack extends cdk.Stack {
       handler: 'index.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/add-to-cart')),
       role: addToCartRole,
+      logGroup: makeLogGroup('AddToCartLogGroup', 'AddToCart'),
       environment: {
         MENU_TABLE_NAME: menuTableNameParam.valueAsString,
         CARTS_TABLE_NAME: cartsTableNameParam.valueAsString,
@@ -245,6 +267,7 @@ export class LambdaStack extends cdk.Stack {
       handler: 'index.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/get-cart')),
       role: getCartRole,
+      logGroup: makeLogGroup('GetCartLogGroup', 'GetCart'),
       environment: {
         CARTS_TABLE_NAME: cartsTableNameParam.valueAsString,
       },
@@ -261,6 +284,7 @@ export class LambdaStack extends cdk.Stack {
       handler: 'index.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/update-cart')),
       role: updateCartRole,
+      logGroup: makeLogGroup('UpdateCartLogGroup', 'UpdateCart'),
       environment: {
         CARTS_TABLE_NAME: cartsTableNameParam.valueAsString,
       },
@@ -278,6 +302,7 @@ export class LambdaStack extends cdk.Stack {
       handler: 'index.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/place-order')),
       role: placeOrderRole,
+      logGroup: makeLogGroup('PlaceOrderLogGroup', 'PlaceOrder'),
       environment: {
         CARTS_TABLE_NAME: cartsTableNameParam.valueAsString,
         ORDERS_TABLE_NAME: ordersTableNameParam.valueAsString,
@@ -304,6 +329,7 @@ export class LambdaStack extends cdk.Stack {
         path.join(__dirname, '../lambda/get-nearest-locations'),
       ),
       role: getNearestLocationsRole,
+      logGroup: makeLogGroup('GetNearestLocationsLogGroup', 'GetNearestLocations'),
       environment: {
         LOCATIONS_TABLE_NAME: locationsTableNameParam.valueAsString,
         PLACE_INDEX_NAME: placeIndexNameParam.valueAsString,
@@ -335,6 +361,7 @@ export class LambdaStack extends cdk.Stack {
           path.join(__dirname, '../lambda/find-location-along-route'),
         ),
         role: findLocationAlongRouteRole,
+        logGroup: makeLogGroup('FindLocationAlongRouteLogGroup', 'FindLocationAlongRoute'),
         environment: {
           LOCATIONS_TABLE_NAME: locationsTableNameParam.valueAsString,
           ROUTE_CALCULATOR_NAME: routeCalculatorNameParam.valueAsString,
@@ -362,6 +389,7 @@ export class LambdaStack extends cdk.Stack {
         path.join(__dirname, '../lambda/geocode-address'),
       ),
       role: geocodeAddressRole,
+      logGroup: makeLogGroup('GeocodeAddressLogGroup', 'GeocodeAddress'),
       environment: {
         PLACE_INDEX_NAME: placeIndexNameParam.valueAsString,
       },

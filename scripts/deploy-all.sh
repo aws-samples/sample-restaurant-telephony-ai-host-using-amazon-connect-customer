@@ -358,20 +358,25 @@ print_info "Bedrock AgentCore-supported AZs in this account: $AGENTCORE_AZS"
 ################################################################################
 # Auto-heal: remove orphan dev-prefix log groups + stuck CFN stacks before
 # the deploy starts. Per working agreement #9: scripts must auto-heal where
-# possible. The two recurring failure modes this addresses:
+# possible.
 #
-#   1. CloudWatch log groups for Lambda/CodeBuild/ECS/API Gateway are created
-#      by AWS at first invocation, NOT by CDK. After a `cdk destroy` they
-#      survive as orphans. The next `cdk deploy` then fails with
-#      "Resource of type AWS::Logs::LogGroup ... already exists" because
-#      CFN can't claim ownership of an existing resource it didn't create.
-#      Fix: delete every orphan log group whose name starts with the project
-#      prefix BEFORE `cdk deploy` runs.
+# Note: every Lambda, CodeBuild project, and ECS task definition in this
+# project pre-creates its CloudWatch log group through CDK with
+# `RemovalPolicy.DESTROY`, so `cdk destroy` cleans them up symmetrically.
+# This preflight sweep is a belt-and-suspenders fallback for two cases that
+# can still leak orphans:
 #
-#   2. CFN stacks left in REVIEW_IN_PROGRESS / ROLLBACK_COMPLETE from a
-#      prior failed deploy block re-creation. CFN refuses `update-stack`
-#      on those statuses; the stack must be deleted first.
-#      Fix: scan project-known stack names and delete any in those states.
+#   1. An older deployment that ran BEFORE every Lambda gained an explicit
+#      `logGroup:` binding may have left lazily-created log groups behind.
+#      Those orphans block the new deploy with
+#      "Resource of type AWS::Logs::LogGroup ... already exists".
+#   2. A future Lambda or CodeBuild project added without the explicit
+#      binding could repeat the same trap; the sweep auto-heals it on the
+#      next deploy.
+#
+# Stuck CFN stacks (REVIEW_IN_PROGRESS / ROLLBACK_COMPLETE) from a prior
+# failed deploy block re-creation. CFN refuses `update-stack` on those
+# statuses; the stack must be deleted first.
 ################################################################################
 preflight_log_group_sweep() {
   local prefix="$1"
