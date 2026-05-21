@@ -195,8 +195,13 @@ export class CdkStack extends cdk.Stack {
     //    runtime using the ApiGatewayId + stage passed to the custom resource.)
 
     // ───────────── Custom Resource Provider ─────────────
+    // Note: NO explicit logGroupName on the framework log group below —
+    // when both the CFN-managed log group and AWS Lambda's lazy
+    // auto-create logic target the same name, the framework Lambda's
+    // last-invocation flush during stack delete recreates the group
+    // outside CFN's ownership and the orphan blocks the next deploy.
+    // CDK's auto-generated hash-suffixed name avoids the collision.
     const providerLogGroup = new logs.LogGroup(this, 'GatewayProviderLogs', {
-      logGroupName: cdk.Fn.sub('/aws/lambda/${P}-gateway-provider', { P: prefix }),
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });

@@ -382,9 +382,11 @@ export class SipGatewayStack extends cdk.Stack {
       this,
       'BuildWaiterProviderLogGroup',
       {
-        logGroupName: cdk.Fn.sub('/aws/lambda/${P}-sip-gateway-build-waiter-provider', {
-          P: prefix,
-        }),
+        // Note: NO explicit logGroupName — see runtime-stack.ts pepper
+        // provider for the same rationale. Setting an explicit
+        // `/aws/lambda/<name>` collides with AWS Lambda's
+        // last-invocation lazy-create during stack destroy and leaves
+        // an orphan that blocks the next deploy.
         retention: logs.RetentionDays.ONE_MONTH,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
       },

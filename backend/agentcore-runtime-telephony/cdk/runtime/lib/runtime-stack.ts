@@ -127,8 +127,12 @@ export class AgentRuntimeStack extends cdk.Stack {
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
+    // Note: NO explicit logGroupName for the cr.Provider's framework log
+    // group. The framework Lambda's CFN-managed name and AWS Lambda's
+    // lazy auto-create logic collide when both target the same explicit
+    // name. CDK auto-generates a hash-suffixed group that AWS Lambda
+    // never tries to claim. See reference-project pattern + design §22.
     const pepperProviderLogGroup = new logs.LogGroup(this, 'PepperProviderLogGroup', {
-      logGroupName: cdk.Fn.sub('/aws/lambda/${P}-pepper-manager-provider', { P: prefix }),
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });

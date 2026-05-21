@@ -215,8 +215,12 @@ export class AgentBuildStack extends cdk.Stack {
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
+    // Note: NO explicit logGroupName on the cr.Provider's framework log
+    // group — see runtime-stack.ts pepper provider for the same
+    // rationale. Setting an explicit `/aws/lambda/<name>` collides with
+    // AWS Lambda's last-invocation lazy-create during stack destroy and
+    // leaves an orphan that blocks the next deploy.
     const providerFrameworkLogGroup = new logs.LogGroup(this, 'BuildWaiterProviderFrameworkLogGroup', {
-      logGroupName: cdk.Fn.sub('/aws/lambda/${P}-agent-build-waiter-provider', { P: prefix }),
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
