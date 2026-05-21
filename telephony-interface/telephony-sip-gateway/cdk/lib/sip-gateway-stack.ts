@@ -839,6 +839,37 @@ export class SipGatewayStack extends cdk.Stack {
       },
       deregistrationDelay: cdk.Duration.seconds(10),
     });
+
+    // ───────────── SIP dialog stickiness (May 2026 fix) ─────────────
+    //
+    // Drachtio holds dialog state in process memory; it is NOT shared
+    // across tasks. With desiredCount=2 behind the NLB, Chime's INVITE
+    // can land on task A while a follow-up ACK on a NEW TCP connection
+    // (Chime opens a fresh connection to the Contact header URI we
+    // advertise in the 200 OK) can be hashed by the NLB's 5-tuple onto
+    // task B. Task B has no matching dialog and silently drops the ACK
+    // as orphan; task A retransmits the 200 OK until RFC 3261 Timer H
+    // fires (~32 s) and tears the call down. Symptom from the caller:
+    // "agent suddenly stopped talking 32 s into the call".
+    //
+    // Source-IP stickiness pins every TCP connection from a given
+    // Chime egress IP to the same task, so INVITE + ACK + any in-dialog
+    // requests (BYE, re-INVITE) all land on the drachtio instance that
+    // owns the dialog. This is the same pattern the drachtio HA docs
+    // recommend when not running a redis-backed dialog store.
+    //
+    // For us-east-1 Chime VC the source-IP set is
+    // `3.80.16.0/23 + 99.77.253.0/24` (a small fixed prefix list); two
+    // tasks behind the NLB still get rough load balancing because Chime
+    // hashes the source port across that pool. If we ever scale beyond
+    // two tasks AND see uneven load, switch to a redis-backed dialog
+    // store and revisit.
+    // Source-IP stickiness via the L2 setAttribute() so we don't
+    // clobber attributes the construct already emits for
+    // deregistrationDelay, preserveClientIp, etc.
+    sipTg.setAttribute('stickiness.enabled', 'true');
+    sipTg.setAttribute('stickiness.type', 'source_ip');
+
     nlb.addListener('SipListener', {
       port: 5060,
       protocol: elbv2.Protocol.TCP,
