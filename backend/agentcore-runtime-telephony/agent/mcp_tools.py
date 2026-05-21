@@ -15,6 +15,24 @@ reference `qsr_agent.py` lines ~240-275).
 Retry contract (R16 F4): one retry after 500 ms on MCP tool failure;
 second failure raises `ToolError` which Nova Sonic surfaces as a
 natural-language "sorry, can't reach the kitchen" message.
+
+Customer-id isolation (R8 / P11):
+The agent MUST NEVER trust a customerId emitted by the model — even
+when the system prompt says so, the LLM has been observed to
+hallucinate plausible-looking values (e.g. the caller's display name).
+Two-layer defence implemented here:
+  1. `strip_customer_id_from_schemas` removes the `customerId` field
+     from every MCP tool's input schema before the agent is
+     constructed, so the model literally cannot include it in a
+     tool_use argument.
+  2. `customer_id_hook(session.customer_id)` returns a Strands
+     `HookProvider` registered on the `BidiAgent`. The hook fires on
+     every `BidiBeforeToolCallEvent` and unconditionally overwrites
+     `tool_use["input"]["customerId"]` with the session-derived value
+     before the executor calls `MCPAgentTool.stream(...)`. Sources:
+       - strands-agents/sdk-python v1.37.0
+         src/strands/tools/executors/_executor.py:131-135
+         src/strands/experimental/hooks/events.py:96-115
 """
 from __future__ import annotations
 
@@ -22,6 +40,10 @@ import asyncio
 import logging
 import os
 from typing import TYPE_CHECKING, Any, Callable, Dict, List
+
+# NOTE: strands is imported lazily inside `customer_id_hook` and the
+# hook class so this module remains importable in test environments
+# that do not install the bidi extra. The container always has it.
 
 logger = logging.getLogger(__name__)
 
@@ -89,36 +111,134 @@ def apply_basepath_workaround(mcp_tools: List[Any]) -> List[Any]:
     return mcp_tools
 
 
-def wrap_tools_with_customer_id(tools: List[Any], customer_id: str) -> List[Any]:
-    """Inject `customerId=<customer_id>` into every tool call.
+def strip_customer_id_from_schemas(mcp_tools: List[Any]) -> List[Any]:
+    """Remove `customerId` from every tool's inputSchema.
 
-    Each Strands tool is wrapped in a closure that mutates the tool
-    arguments to carry `customerId` regardless of what the model passes.
-    This closes the R8 step-5 loop without relying on the model to always
-    include customerId on every tool call.
+    Belt for the suspenders that is `customer_id_hook`. The MCP gateway
+    surfaces `customerId` as a top-level required parameter on most
+    tools so the OpenAPI contract can be reused by other (web / mobile)
+    clients. For the telephony agent the value is verified server-side
+    from the SIP-derived hash and MUST NEVER be supplied by the model.
+
+    Removing the field from the schema means the LLM literally cannot
+    include `customerId` in the tool_use it emits — Nova Sonic only
+    fills in fields that exist in the tool spec. This stops the
+    hallucinated-value class of bug at the source. The hook still
+    overwrites the field at invoke time as defence in depth.
     """
-    wrapped: List[Any] = []
-    for tool in tools:
-        # Dynamic attribute set — concrete strands.tool wrapper type
-        # varies by version. The reference implementation simply appends
-        # the list, relying on the system prompt to drive customerId.
-        # Here we add a per-tool closure via setattr to be safe.
-        try:
-            original_invoke = getattr(tool, "invoke", None)
-            if original_invoke is None:
-                wrapped.append(tool)
-                continue
+    modified = 0
+    for tool in mcp_tools:
+        schema = getattr(getattr(tool, "mcp_tool", None), "inputSchema", None)
+        if not isinstance(schema, dict):
+            continue
+        props = schema.get("properties")
+        if isinstance(props, dict) and "customerId" in props:
+            del props["customerId"]
+            modified += 1
+        required = schema.get("required")
+        if isinstance(required, list) and "customerId" in required:
+            required.remove("customerId")
+    logger.info(
+        "mcp_tools customerId stripped from input schemas",
+        extra={"modified": modified},
+    )
+    return mcp_tools
 
-            async def _wrapped(args: Dict[str, Any], _orig=original_invoke) -> Any:
-                if isinstance(args, dict) and "customerId" not in args:
-                    args = {**args, "customerId": customer_id}
-                return await _orig(args)
 
-            tool.invoke = _wrapped  # type: ignore[attr-defined]
-            wrapped.append(tool)
-        except Exception:  # pragma: no cover — best effort
-            wrapped.append(tool)
-    return wrapped
+class _CustomerIdInjector:
+    """Strands hook that overwrites `customerId` on every BidiAgent tool call.
+
+    Implements `strands.hooks.HookProvider` (duck-typed; we don't
+    inherit so the import stays lazy — the strands package is only
+    available inside the runtime container, not in test envs).
+
+    Strands fires `BidiBeforeToolCallEvent` immediately before the tool
+    executor invokes `MCPAgentTool.stream(tool_use, ...)`, so any value
+    the model put under `tool_use["input"]["customerId"]` (typically a
+    hallucinated display-name) is replaced with the session-derived
+    pseudonymous id before it reaches MCP / the gateway / the Lambda.
+
+    Sources (strands-agents/sdk-python v1.37.0):
+      - hook event class: src/strands/experimental/hooks/events.py:96
+      - executor reads before_event.tool_use after hook returns:
+        src/strands/tools/executors/_executor.py:131-135
+    """
+
+    def __init__(self, customer_id: str) -> None:
+        if not customer_id:
+            raise ValueError("customer_id must be a non-empty string")
+        self._customer_id = customer_id
+
+    def register_hooks(self, registry: Any, **_: Any) -> None:
+        # Lazy import — strands is only present inside the container.
+        from strands.experimental.hooks.events import BidiBeforeToolCallEvent
+
+        registry.add_callback(BidiBeforeToolCallEvent, self._on_before_tool_call)
+
+    async def _on_before_tool_call(self, event: Any) -> None:
+        tool_use = event.tool_use
+        # `tool_use["input"]` is the dict the model emitted. Per
+        # strands.types.tools.ToolUse it is `Any`, but for MCP tools
+        # the model emits a dict. If it isn't, replace with a fresh
+        # dict carrying only customerId — better to drop a malformed
+        # payload than to leak the model's hallucinated value
+        # downstream.
+        args = tool_use.get("input")
+        if not isinstance(args, dict):
+            args = {}
+
+        # UNCONDITIONAL overwrite — do not use setdefault, do not check
+        # presence. The whole point is the model's value is untrusted.
+        prior = args.get("customerId")
+        args["customerId"] = self._customer_id
+        tool_use["input"] = args
+
+        # Log when the model tried to put something other than our id
+        # so we can see (post-fix) whether the model is still
+        # attempting to hallucinate. Useful telemetry, not a
+        # functional requirement.
+        if prior is not None and prior != self._customer_id:
+            logger.warning(
+                "customerId hallucinated by model; overwritten",
+                extra={
+                    "tool_name": tool_use.get("name"),
+                    "model_value_len": len(str(prior)),
+                },
+            )
+
+
+def customer_id_hook(customer_id: str) -> Any:
+    """Public factory — pass the result into `BidiAgent(hooks=[...])`.
+
+    Returns a `strands.hooks.HookProvider`-compatible object. Lazy
+    import means this function works without the strands package
+    installed at import time, but it WILL fail at hook registration
+    time inside `BidiAgent` if strands is missing — which is the
+    correct failure mode (the agent cannot run without strands
+    anyway).
+    """
+    return _CustomerIdInjector(customer_id)
+
+
+def wrap_tools_with_customer_id(tools: List[Any], customer_id: str) -> List[Any]:
+    """DEPRECATED: dead code (kept for unit-test stability only).
+
+    Setting `tool.invoke = ...` does not intercept anything — the
+    Strands runtime calls `tool.stream(tool_use, ...)` (an async
+    generator), not `tool.invoke(args)`. Use `customer_id_hook` +
+    `strip_customer_id_from_schemas` from this module instead.
+
+    Sources (strands-agents/sdk-python v1.37.0):
+      - executor calls `selected_tool.stream(tool_use, invocation_state, ...)` at
+        src/strands/tools/executors/_executor.py:209
+      - MCPAgentTool.stream implementation:
+        src/strands/tools/mcp/mcp_agent_tool.py:79-104
+    """
+    logger.warning(
+        "mcp_tools.wrap_tools_with_customer_id called — this is dead code; "
+        "use customer_id_hook + strip_customer_id_from_schemas instead"
+    )
+    return tools
 
 
 async def call_with_retry(tool_invoke: Callable[[Dict[str, Any]], Any], args: Dict[str, Any]) -> Any:

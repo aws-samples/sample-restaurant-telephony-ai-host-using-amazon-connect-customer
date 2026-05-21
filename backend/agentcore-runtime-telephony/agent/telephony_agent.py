@@ -131,12 +131,18 @@ print("[telephony_agent] MODULE LOADED", flush=True)
 def _discover_tools(customer_id: str) -> tuple[MCPClient, List[Any]]:
     """Open an MCPClient against AgentCore Gateway and return wrapped tools.
 
-    Caller is responsible for context-managing the returned client.  Tools
+    Caller is responsible for context-managing the returned client. Tools
     have:
       (a) the basePath workaround applied (AgentCore Gateway OpenAPI bug
           — see mcp_tools.apply_basepath_workaround),
-      (b) the customer_id auto-injected into every invocation
-          (mcp_tools.wrap_tools_with_customer_id).
+      (b) the customerId field STRIPPED from every input schema so the
+          model cannot include it in a tool_use payload
+          (see mcp_tools.strip_customer_id_from_schemas).
+
+    customerId is then re-injected at invoke time by the hook returned
+    from `mcp_tools.customer_id_hook(customer_id)` — the caller MUST
+    register that hook on the BidiAgent or tool calls will land at the
+    Lambda with no customerId at all.
     """
     factory = mcp_tools.for_customer(customer_id)
     client = MCPClient(factory)
@@ -156,7 +162,7 @@ def _discover_tools(customer_id: str) -> tuple[MCPClient, List[Any]]:
     )
     logger.info("mcp tools discovered", extra={"count": len(raw), "names": names})
     mcp_tools.apply_basepath_workaround(raw)
-    tools = mcp_tools.wrap_tools_with_customer_id(raw, customer_id)
+    tools = mcp_tools.strip_customer_id_from_schemas(raw)
     print(
         f"[telephony_agent] tools ready for BidiAgent count={len(tools)}",
         flush=True,
@@ -295,6 +301,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             model=model,
             tools=tools,
             system_prompt=resolved_prompt,
+            hooks=[mcp_tools.customer_id_hook(session.customer_id)],
         )
 
         # Manual start + send + receive loop — the documented pattern
