@@ -202,3 +202,146 @@ module.exports = {
   canonicalUriFromRaw,
   rfc3986Encode,
 };
+
+
+/**
+ * Sign a POST request with SigV4 header auth.
+ *
+ * Used for control-plane / data-plane API calls that don't fit the
+ * presigned-URL pattern (e.g. PutMetricData, StopRuntimeSession). The
+ * caller passes a parsed URL object, the body string, and credentials;
+ * we return a headers object including Authorization that the caller
+ * threads into `fetch(url, { method: 'POST', headers, body })`.
+ *
+ * Mirrors the previous in-line implementation that lived in
+ * `cloudwatch-metrics.js`. Hoisted here so AgentCore Runtime control
+ * plane calls (`stopRuntimeSession`) can reuse the same helper without
+ * duplicating ~60 lines.
+ *
+ * @param {object} opts
+ * @param {URL} opts.url            Full request URL (parsed via `new URL(...)`).
+ * @param {string} opts.region
+ * @param {string} opts.service     e.g. "monitoring", "bedrock-agentcore".
+ * @param {object} opts.credentials { accessKeyId, secretAccessKey, sessionToken? }.
+ * @param {string} opts.body        Request body as a string (use '' for empty).
+ * @returns {object}                Headers map ready to pass into fetch().
+ */
+function signPostHeaders({ url, region, service, credentials, body }) {
+  if (!url || typeof url !== 'object' || !url.host) {
+    throw new TypeError('signPostHeaders: url must be a parsed URL with a host');
+  }
+  if (!region || !service) {
+    throw new TypeError('signPostHeaders: region and service are required');
+  }
+  const { accessKeyId, secretAccessKey, sessionToken } = credentials || {};
+  if (!accessKeyId || !secretAccessKey) {
+    throw new Error('signPostHeaders: missing credentials');
+  }
+
+  const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
+  const dateStamp = amzDate.slice(0, 8);
+  const payloadHash = sha256Hex(body || '');
+
+  // Determine the content type — caller may set this explicitly later
+  // by mutating the returned headers, but for SigV4 canonicalization
+  // we need to know it now. Default matches what most AWS POST APIs
+  // accept (form-encoded for monitoring, application/json works for
+  // bedrock-agentcore data plane).
+  const contentType =
+    service === 'monitoring'
+      ? 'application/x-www-form-urlencoded; charset=utf-8'
+      : 'application/json';
+
+  const signedHeadersList = [
+    'content-type',
+    'host',
+    'x-amz-content-sha256',
+    'x-amz-date',
+  ];
+  const canonicalHeaders = {
+    'content-type': contentType,
+    host: url.host,
+    'x-amz-content-sha256': payloadHash,
+    'x-amz-date': amzDate,
+  };
+  if (sessionToken) {
+    signedHeadersList.push('x-amz-security-token');
+    canonicalHeaders['x-amz-security-token'] = sessionToken;
+  }
+  signedHeadersList.sort();
+  const canonicalHeaderString = signedHeadersList
+    .map((h) => `${h}:${canonicalHeaders[h]}\n`)
+    .join('');
+  const signedHeaders = signedHeadersList.join(';');
+
+  // Canonical URI: percent-encode each path segment per RFC 3986. The
+  // existing canonicalUriFromRaw helper does exactly this.
+  const canonicalUri = canonicalUriFromRaw(url.pathname);
+
+  // Canonical query string: sort by key then value, encode each side.
+  const canonicalQuery = (() => {
+    const params = [];
+    for (const [k, v] of url.searchParams) params.push([k, v]);
+    return params
+      .map(([k, v]) => [rfc3986Encode(k), rfc3986Encode(v)])
+      .sort((a, b) =>
+        a[0] < b[0]
+          ? -1
+          : a[0] > b[0]
+            ? 1
+            : a[1] < b[1]
+              ? -1
+              : a[1] > b[1]
+                ? 1
+                : 0,
+      )
+      .map(([k, v]) => `${k}=${v}`)
+      .join('&');
+  })();
+
+  const canonicalRequest = [
+    'POST',
+    canonicalUri,
+    canonicalQuery,
+    canonicalHeaderString,
+    signedHeaders,
+    payloadHash,
+  ].join('\n');
+
+  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
+  const stringToSign = [
+    ALGORITHM,
+    amzDate,
+    credentialScope,
+    sha256Hex(canonicalRequest),
+  ].join('\n');
+
+  const kDate = hmac('AWS4' + secretAccessKey, dateStamp);
+  const kRegion = hmac(kDate, region);
+  const kService = hmac(kRegion, service);
+  const kSigning = hmac(kService, 'aws4_request');
+  const signature = crypto
+    .createHmac('sha256', kSigning)
+    .update(stringToSign)
+    .digest('hex');
+
+  const authorization =
+    `${ALGORITHM} ` +
+    `Credential=${accessKeyId}/${credentialScope}, ` +
+    `SignedHeaders=${signedHeaders}, ` +
+    `Signature=${signature}`;
+
+  const headers = {
+    'Content-Type': contentType,
+    Host: url.host,
+    'X-Amz-Date': amzDate,
+    'X-Amz-Content-Sha256': payloadHash,
+    Authorization: authorization,
+  };
+  if (sessionToken) {
+    headers['X-Amz-Security-Token'] = sessionToken;
+  }
+  return headers;
+}
+
+module.exports.signPostHeaders = signPostHeaders;

@@ -1,5 +1,11 @@
 *.js
 !jest.config.js
+# Hand-written runtime helpers used by the SMA Lambda — kept as plain
+# JS (not TypeScript) so the deployed `index.js` Lambda artefact stays
+# byte-identical to source for hot-edits in the AWS console while
+# debugging. Without this whitelist the broad `*.js` rule above would
+# silently swallow them.
+!lambda/sma-handler/*.js
 *.d.ts
 node_modules
 

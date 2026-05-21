@@ -601,6 +601,13 @@ export class SipGatewayStack extends cdk.Stack {
     // on the wss:/<arn>/ws upgrade because the server maps the upgrade
     // request to InvokeAgentRuntimeWithWebSocketStream, not the HTTP
     // sibling action.
+    //
+    // StopRuntimeSession terminates the per-session microVM on hangup
+    // so the Active-session-workloads quota slot is freed for the next
+    // caller. Required because we now use microVM stickiness via the
+    // X-Amzn-Bedrock-AgentCore-Runtime-Session-Id header — without
+    // explicit teardown the slot stays allocated until the 15-min
+    // idle timer fires.
     taskRole.addToPolicy(
       new iam.PolicyStatement({
         sid: 'InvokeAgentRuntime',
@@ -609,6 +616,7 @@ export class SipGatewayStack extends cdk.Stack {
           'bedrock-agentcore:InvokeAgentRuntime',
           'bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream',
           'bedrock-agentcore:InvokeAgentStream',
+          'bedrock-agentcore:StopRuntimeSession',
         ],
         resources: [
           agentRuntimeArn.valueAsString,

@@ -118,6 +118,44 @@ export class IngressStack extends cdk.Stack {
     });
     const phoneNumberE164 = phoneNumberE164Param.valueAsString;
 
+    // ───── AgentCore Runtime warmup parameters (added in the pre-warm refactor) ─────
+    //
+    // The SMA Lambda now pre-warms the AgentCore microVM by issuing a
+    // SigV4-signed POST to the Runtime's /invocations endpoint with a
+    // deterministic session id derived from the caller's E.164. The
+    // session id is then ridden forward on the CallAndBridge action via
+    // a `SipHeaders.X-Session-Id` SIP header so the bridge attaches to
+    // the same warm microVM. See:
+    //   https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-sessions.html
+    //
+    // Both parameters are threaded in by scripts/deploy-all.sh from
+    // cdk-outputs/tel-agent-runtime.json. Empty values are tolerated
+    // by the Lambda — it logs `warmup_skipped_no_runtime_arn` and falls
+    // through to the legacy CallAndBridge-without-warmup flow.
+    const agentRuntimeArnParam = new cdk.CfnParameter(this, 'AgentRuntimeArn', {
+      type: 'String',
+      default: '',
+      description:
+        'AgentCore Runtime ARN. SMA Lambda calls bedrock-agentcore:InvokeAgentRuntime against this ARN to pre-warm the microVM.',
+    });
+    const customerIdPepperParameterArnParam = new cdk.CfnParameter(
+      this,
+      'CustomerIdPepperParameterArn',
+      {
+        type: 'String',
+        default: '',
+        description:
+          'SSM SecureString parameter ARN for the customer-id pepper. SMA Lambda reads it once at cold-start to derive the session id. Same pepper the agent reads server-side.',
+      },
+    );
+    const agentVoiceIdParam = new cdk.CfnParameter(this, 'AgentVoiceId', {
+      type: 'String',
+      default: 'tiffany',
+      allowedValues: ['matthew', 'tiffany', 'amy'],
+      description:
+        'Nova Sonic voice id passed in the warmup body. Must match the value the bridge passes on its wss query param.',
+    });
+
     // ───────────── SMA Lambda ─────────────
     // Explicit log group with 1-month retention so it can be deleted on
     // stack teardown (NFR13 default: delete ephemeral logs).
@@ -186,8 +224,12 @@ export class IngressStack extends cdk.Stack {
       bundling: {
         format: OutputFormat.CJS,
         target: 'node24',
-        minify: true,
-        sourceMap: true,
+        // minify: false so the deployed Lambda's index.js stays
+        // human-readable for hot-edits in the AWS Lambda console
+        // (working agreement: legibility for live debugging is more
+        // valuable than the ~30 KB the bundle saves on minification).
+        minify: false,
+        sourceMap: false,
         // `@aws-sdk/*` is provided by the Node 24 Lambda managed runtime.
         externalModules: ['@aws-sdk/*'],
       },
@@ -200,8 +242,13 @@ export class IngressStack extends cdk.Stack {
         // location routing). Disable in production by setting to
         // 'false' once the routing investigation is complete.
         LOG_RAW_EVENT: 'true',
-        // VOICE_CONNECTOR_ARN_PARAM gets added below, once the SSM
-        // parameter exists.
+        // AgentCore Runtime warmup config. Empty strings are tolerated
+        // by the Lambda — see the warmup-skipped logging paths.
+        AGENT_RUNTIME_ARN: agentRuntimeArnParam.valueAsString,
+        AGENT_VOICE_ID: agentVoiceIdParam.valueAsString,
+        // VOICE_CONNECTOR_ARN_PARAM and CUSTOMER_ID_PEPPER_PARAMETER_NAME
+        // get added below, once their underlying SSM resources / grants
+        // are wired.
       },
     });
 
@@ -301,6 +348,103 @@ export class IngressStack extends cdk.Stack {
     // Wire the SMA Lambda to read the VC ARN at warm-up.
     smaFn.addEnvironment('VOICE_CONNECTOR_ARN_PARAM', vcArnParam.parameterName);
     vcArnParam.grantRead(smaFn);
+
+    // ───── AgentCore Runtime warmup IAM + env wiring ─────
+    //
+    // Two grants needed for the SMA Lambda to pre-warm the AgentCore
+    // microVM:
+    //   1. bedrock-agentcore:InvokeAgentRuntime against the runtime ARN
+    //      (POST /invocations is the data-plane invocation API).
+    //   2. ssm:GetParameter + kms:Decrypt against the customer-id pepper
+    //      SSM SecureString parameter (so the Lambda can derive the
+    //      session id deterministically vs the agent-side helper).
+    //
+    // Both grants are conditional on the corresponding CfnParameter
+    // being non-empty. Empty values produce no IAM statement — the
+    // Lambda still deploys, just without warmup (logs
+    // `warmup_skipped_no_runtime_arn`).
+    const hasAgentRuntimeArn = new cdk.CfnCondition(this, 'HasAgentRuntimeArn', {
+      expression: cdk.Fn.conditionNot(
+        cdk.Fn.conditionEquals(agentRuntimeArnParam.valueAsString, ''),
+      ),
+    });
+    const invokeRuntimePolicy = new iam.CfnPolicy(this, 'InvokeAgentRuntimePolicy', {
+      policyName: cdk.Fn.sub('${P}-sma-invoke-agent-runtime', { P: prefix }),
+      roles: [smaLambdaRole.roleName],
+      policyDocument: {
+        Version: '2012-10-17',
+        Statement: [
+          {
+            Sid: 'InvokeAgentRuntimeForWarmup',
+            Effect: 'Allow',
+            Action: [
+              'bedrock-agentcore:InvokeAgent',
+              'bedrock-agentcore:InvokeAgentRuntime',
+              'bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream',
+              'bedrock-agentcore:InvokeAgentStream',
+            ],
+            Resource: [
+              agentRuntimeArnParam.valueAsString,
+              cdk.Fn.sub('${Arn}/runtime-endpoint/*', {
+                Arn: agentRuntimeArnParam.valueAsString,
+              }),
+            ],
+          },
+        ],
+      },
+    });
+    invokeRuntimePolicy.cfnOptions.condition = hasAgentRuntimeArn;
+
+    const hasPepperParam = new cdk.CfnCondition(this, 'HasPepperParam', {
+      expression: cdk.Fn.conditionNot(
+        cdk.Fn.conditionEquals(customerIdPepperParameterArnParam.valueAsString, ''),
+      ),
+    });
+    const pepperReadPolicy = new iam.CfnPolicy(this, 'PepperReadPolicy', {
+      policyName: cdk.Fn.sub('${P}-sma-pepper-read', { P: prefix }),
+      roles: [smaLambdaRole.roleName],
+      policyDocument: {
+        Version: '2012-10-17',
+        Statement: [
+          {
+            Sid: 'ReadCustomerIdPepperFromSSM',
+            Effect: 'Allow',
+            Action: ['ssm:GetParameter'],
+            Resource: [customerIdPepperParameterArnParam.valueAsString],
+          },
+          {
+            // Pepper is a SecureString; SSM uses the AWS-managed
+            // `aws/ssm` KMS key by default. The ViaService condition
+            // narrows the kms:Decrypt grant so this role can ONLY
+            // decrypt under SSM's umbrella, not from anywhere else.
+            Sid: 'DecryptPepperViaSSM',
+            Effect: 'Allow',
+            Action: ['kms:Decrypt'],
+            Resource: ['*'],
+            Condition: {
+              StringEquals: {
+                'kms:ViaService': cdk.Fn.sub('ssm.${R}.amazonaws.com', {
+                  R: cdk.Aws.REGION,
+                }),
+              },
+            },
+          },
+        ],
+      },
+    });
+    pepperReadPolicy.cfnOptions.condition = hasPepperParam;
+
+    // Pass the pepper SSM parameter NAME (not ARN) to the Lambda so it
+    // matches the AGENT-side env var convention. The agent's
+    // pstn_customer.py uses `os.environ["CUSTOMER_ID_PEPPER_PARAMETER_NAME"]`
+    // and calls ssm.get_parameter(Name=...), so we keep the contract
+    // identical here. The CDK CfnParameter already carries the ARN so
+    // we extract the parameter name via Fn::Split on `:parameter`.
+    const pepperParamName = cdk.Fn.select(
+      1,
+      cdk.Fn.split(':parameter', customerIdPepperParameterArnParam.valueAsString),
+    );
+    smaFn.addEnvironment('CUSTOMER_ID_PEPPER_PARAMETER_NAME', pepperParamName);
 
     // ───────────── Chime SIP Media Application ─────────────
     const sma = new ChimeSipMediaApp(this, 'SipMediaApp', {

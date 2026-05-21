@@ -68,9 +68,20 @@ async function handleInvite({ req, res, srf, portPool, agentConfig }) {
   const fromUri = fromHeader?.uri || '';
   const callerFrom =
     (fromUri.match(/^sip[s]?:([^@;]+)/i)?.[1]) || fromUri;
+  // X-Session-Id is set by the SMA Lambda on CallAndBridge (Chime
+  // forwards X-headers verbatim). Used as the AgentCore Runtime
+  // microVM-stickiness key — wired into the wss:// URL and into the
+  // StopRuntimeSession call on hangup. Null-safe: when the SMA Lambda
+  // hasn't been deployed yet (step-2 transitional state) this is
+  // undefined and the agent falls back to anonymous cold-start.
+  const sessionId = req.get('X-Session-Id') || null;
   const log = logger.child({ call_id: callId });
 
-  log.info('invite received', { caller_from: callerFrom, from_uri: fromUri });
+  log.info('invite received', {
+    caller_from: callerFrom,
+    from_uri: fromUri,
+    session_id: sessionId,
+  });
 
   // ───── Parse Chime VC's offer SDP to get its RTP endpoint ─────
   const callerPeer = parseSdpMediaEndpoint(req.body);
@@ -110,6 +121,14 @@ async function handleInvite({ req, res, srf, portPool, agentConfig }) {
     if (activeCountBumped) {
       cloudwatch.decrementActiveCalls();
       activeCountBumped = false;
+    }
+    // Free the AgentCore microVM slot. Best-effort — never throws.
+    if (wsClient) {
+      try {
+        await wsClient.stopRuntimeSession();
+      } catch (err) {
+        log.warn('stopRuntimeSession threw', { err: err.message });
+      }
     }
     try {
       if (wsClient) wsClient.close();
@@ -168,6 +187,7 @@ async function handleInvite({ req, res, srf, portPool, agentConfig }) {
       region: agentConfig.region,
       voiceId: agentConfig.voiceId,
       qualifier: agentConfig.qualifier,
+      sessionId,
       log,
     });
     wsClient.on('audio', (pcm16) => {
@@ -194,7 +214,6 @@ async function handleInvite({ req, res, srf, portPool, agentConfig }) {
     });
 
     await wsClient.connect();
-    wsClient.sendAuthMetadata({ callerFrom, callId });
     cloudwatch.incrementActiveCalls();
     activeCountBumped = true;
     log.info('agentcore bridge up');

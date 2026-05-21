@@ -70,13 +70,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import os
 import warnings
-from typing import Any, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from strands.experimental.bidi.agent import BidiAgent
@@ -96,6 +98,7 @@ from strands.tools.mcp.mcp_client import MCPClient
 
 import mcp_tools
 import prompt_renderer
+import pstn_customer
 import system_prompt
 from protocol import (
     BidiAudioAggregator,
@@ -103,7 +106,6 @@ from protocol import (
     MODEL_INPUT_SAMPLE_RATE,
     MODEL_OUTPUT_SAMPLE_RATE,
     build_stream_audio_envelope,
-    parse_auth_metadata,
 )
 from session import Session
 
@@ -170,6 +172,147 @@ def _discover_tools(customer_id: str) -> tuple[MCPClient, List[Any]]:
     return client, tools
 
 
+# ───────────── Warm-session cache (Option A pre-warm pattern) ─────────────
+#
+# When the SMA Lambda receives a NEW_INBOUND_CALL event from Chime, it
+# fires a `POST /invocations` to the AgentCore Runtime with body
+# `{"type":"warmup", ...customer fields...}` and a deterministic
+# `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header. AgentCore
+# Runtime allocates a microVM, binds the session ID to it ("microVM
+# stickiness"), and routes our `/invocations` POST to the container.
+# We use that 1-2 second window to do all the expensive work: prompt
+# render, Nova Sonic stream open, MCP discovery, and BidiAgent.start().
+#
+# When the bridge later opens its `wss://...?X-Amzn-...-Session-Id=<id>`
+# connection, AgentCore routes it to the SAME microVM. The /ws handler
+# pulls the pre-built `WarmSession` out of `_warm_sessions[session_id]`
+# and starts streaming audio immediately — no auth message, no cold
+# start. Source: https://repost.aws/articles/ARCJIn3t7aRC2FxiRTV1SuCA
+#
+# Cache lifetime: per-microVM in-memory dict. Entries are popped on
+# /ws connect (single-use). If the microVM is recycled (idle timeout,
+# StopRuntimeSession from the bridge on hangup, or maxLifetime) the
+# whole cache vanishes with it — the bridge's next call gets a fresh
+# session ID via the SMA Lambda, so this is a non-issue.
+@dataclass
+class WarmSession:
+    """Cached call context populated by the /invocations warmup path.
+
+    Holds the live MCPClient and BidiAgent so the websocket handler
+    can attach to them directly. The MCP client must be context-
+    managed by the consumer (the websocket handler will close it in
+    `finally`).
+    """
+
+    session: Session
+    voice_id: str
+    resolved_prompt: str
+    mcp_client: MCPClient
+    agent: BidiAgent
+
+
+_warm_sessions: Dict[str, WarmSession] = {}
+
+
+async def _build_call_context(session: Session, voice_id: str) -> WarmSession:
+    """Run the expensive per-call setup once.
+
+    Resolves the system prompt (via prompt-renderer Lambda or local
+    fallback), builds the BidiNovaSonicModel + BidiAgent, opens the
+    MCPClient, discovers tools, and starts the agent. Returns a
+    WarmSession the caller can stash in `_warm_sessions` (warmup path)
+    or attach to immediately (cold-fallback path).
+
+    Caller owns the MCPClient and is responsible for closing it.
+    """
+    # Resolve the per-call system prompt. Concurrent with model + MCP
+    # setup so the ~50-200 ms renderer call hides behind the heavier
+    # tasks; fall back to the container-baked template on any
+    # renderer failure.
+    renderer_task = asyncio.create_task(
+        prompt_renderer.fetch(session.raw_from, session.customer_id),
+        name=f"renderer-{session.call_id or session.customer_id}",
+    )
+
+    # Strands AudioConfig accepts `input_rate` / `output_rate` keys,
+    # NOT `input_sample_rate` / `output_sample_rate`. The wrong keys
+    # are silently ignored by the SDK; the correct ones plus the
+    # voice_id thread through to Nova Sonic.
+    #
+    # turn_detection.endpointingSensitivity is a Nova 2-only knob;
+    # MEDIUM is the documented default for conversational use.
+    model = BidiNovaSonicModel(
+        model_id=os.environ.get("NOVA_SONIC_MODEL_ID", "amazon.nova-2-sonic-v1:0"),
+        region=os.environ.get("AWS_REGION", "us-east-1"),
+        provider_config={
+            "audio": {
+                "input_rate": MODEL_INPUT_SAMPLE_RATE,
+                "output_rate": MODEL_OUTPUT_SAMPLE_RATE,
+                "channels": MODEL_CHANNELS,
+                "voice": voice_id,
+            },
+            "turn_detection": {
+                "endpointingSensitivity": "MEDIUM",
+            },
+        },
+    )
+
+    mcp_client, tools = _discover_tools(session.customer_id)
+
+    try:
+        rendered = await renderer_task
+        resolved_prompt = rendered.system_prompt
+        session.customer_name = rendered.customer_name
+        session.is_loyalty = rendered.is_loyalty
+        logger.info(
+            "prompt resolved from renderer",
+            extra={
+                "call_id": session.call_id,
+                "is_loyalty": rendered.is_loyalty,
+                "has_name": rendered.customer_name is not None,
+                "prompt_len": len(resolved_prompt),
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "prompt-renderer call failed; falling back to local template",
+            extra={"call_id": session.call_id, "err": str(exc)},
+        )
+        resolved_prompt = system_prompt.build(session)
+
+    agent = BidiAgent(
+        model=model,
+        tools=tools,
+        system_prompt=resolved_prompt,
+        hooks=[mcp_tools.customer_id_hook(session.customer_id)],
+    )
+
+    await agent.start()
+    logger.info("bidi agent started", extra={"call_id": session.call_id})
+    print(
+        f"[telephony_agent] bidi agent started call_id={session.call_id}",
+        flush=True,
+    )
+
+    # Prime Nova Sonic so the model is ready to speak the moment the
+    # /ws connection arrives. agent.send(str) injects user text into
+    # the live bidi session; Nova Sonic responds as if the user said
+    # "Hi", which triggers the greeting from the system prompt.
+    await agent.send("Hi")
+    print(
+        f"[telephony_agent] primed call_id={session.call_id}",
+        flush=True,
+    )
+
+    return WarmSession(
+        session=session,
+        voice_id=voice_id,
+        resolved_prompt=resolved_prompt,
+        mcp_client=mcp_client,
+        agent=agent,
+    )
+
+
 # ───────────── FastAPI app ─────────────
 
 app = FastAPI(title="Telephony Voice Ordering Agent (r6)")
@@ -185,166 +328,227 @@ async def health() -> JSONResponse:
     return JSONResponse({"status": "healthy"})
 
 
+# Header that AgentCore Runtime uses to pin a request to a specific
+# microVM ("microVM stickiness"). Source:
+# https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-sessions.html
+SESSION_ID_HEADER = "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id"
+
+# AgentCore consumes the official session-id query param at its edge for
+# microVM routing and does NOT forward it to the container as an HTTP
+# header. To let the container see the session id, the bridge also
+# passes it under the documented `X-Amzn-Bedrock-AgentCore-Runtime-
+# Custom-*` prefix — AgentCore forwards anything with that prefix to
+# the container as a lowercased HTTP header. Source:
+# https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-get-started-websocket.html#websocket-custom-headers
+SESSION_ID_CUSTOM_HEADER_LOWER = "x-amzn-bedrock-agentcore-runtime-custom-session-id"
+
+
+@app.post("/invocations")
+async def invocations(request: Request) -> JSONResponse:
+    """AgentCore Runtime InvokeAgentRuntime entrypoint.
+
+    Today this handler only services the SMA Lambda's pre-warm call —
+    body shape `{"type":"warmup", "raw_from":..., "anonymous":...,
+    "from_last4":..., "call_id":...}`. The session ID arrives in the
+    `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header and pins this
+    request to a specific microVM. We do all the expensive call setup
+    (prompt render, Nova Sonic stream open, MCP tool discovery,
+    BidiAgent.start, prime with "Hi") right here, then stash the
+    result in `_warm_sessions[session_id]` so the bridge's later
+    `/ws` connection on the same session ID can attach in O(ms).
+
+    Future: any non-warmup invocation type returns 400. We deliberately
+    do not implement a generic POST agent here — the WebSocket is the
+    only data plane this agent supports.
+    """
+    session_id = request.headers.get(SESSION_ID_HEADER)
+    if not session_id:
+        return JSONResponse(
+            {"error": f"missing {SESSION_ID_HEADER} header"}, status_code=400
+        )
+
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "request body is not valid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "request body must be a JSON object"}, status_code=400)
+    if body.get("type") != "warmup":
+        return JSONResponse(
+            {"error": "only type=warmup is supported on /invocations"},
+            status_code=400,
+        )
+
+    raw_from = str(body.get("raw_from") or "")
+    anonymous = bool(body.get("anonymous", True))
+    from_last4 = str(body.get("from_last4") or "")
+    call_id = str(body.get("call_id") or "")
+    voice_id = str(body.get("voice_id") or "tiffany")
+
+    # Re-derive customer_id locally so the agent never has to trust a
+    # value it didn't compute itself. The SMA Lambda uses the same
+    # pepper + same algorithm, so the result is deterministic across
+    # both processes.
+    try:
+        customer_id, derived_anonymous, derived_last4 = (
+            pstn_customer.derive_for_session(raw_from)
+        )
+    except Exception as exc:
+        logger.warning(
+            "pstn_customer.derive_for_session failed in /invocations; using empty pepper",
+            extra={"err": str(exc), "session_id_present": bool(session_id)},
+        )
+        customer_id, derived_anonymous, derived_last4 = pstn_customer.derive(
+            raw_from, b""
+        )
+
+    # Trust the locally-derived values over the SMA-supplied ones in
+    # case of any drift. SMA values are useful as cross-checks only.
+    session = Session(
+        call_id=call_id,
+        raw_from=raw_from,
+        from_last4=derived_last4 or from_last4,
+        anonymous=derived_anonymous if raw_from else anonymous,
+        customer_id=customer_id,
+    )
+
+    logger.info(
+        "warmup received",
+        extra={
+            "call_id": call_id,
+            "from_last4": session.from_last4,
+            "anonymous": session.anonymous,
+            "customer_id": session.customer_id,
+            "session_id": session_id,
+        },
+    )
+
+    try:
+        warm = await _build_call_context(session, voice_id)
+    except Exception:
+        logger.exception(
+            "warmup build_call_context failed",
+            extra={"call_id": call_id, "session_id": session_id},
+        )
+        return JSONResponse(
+            {"error": "warmup_failed", "call_id": call_id},
+            status_code=500,
+        )
+
+    _warm_sessions[session_id] = warm
+    logger.info(
+        "warm session ready",
+        extra={
+            "session_id": session_id,
+            "call_id": call_id,
+            "warm_cache_size": len(_warm_sessions),
+        },
+    )
+    return JSONResponse({"status": "warmed", "call_id": call_id})
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     """One WebSocket = one voice call.
 
     Flow:
-      1. Accept WS.
-      2. Receive the first (text) frame — auth metadata.
-      3. Spin up BidiAgent + MCPClient with a per-call system prompt.
-      4. Kick off the agent with a "Hi" text event so Nova Sonic speaks
-         first.
-      5. Run `_read_loop` + `_write_loop` concurrently until the WebSocket
-         closes or Nova Sonic errors.
+      1. Accept WS; read `X-Amzn-...-Session-Id` from query params.
+      2. Look up `_warm_sessions[session_id]` for the pre-built call
+         context populated by the SMA Lambda's POST /invocations
+         warmup. Cache hit = O(ms) attach. Cache miss = anonymous
+         cold-start (calls still work, just no loyalty).
+      3. Run `_read_loop` + `_paced_writer` + `_keepalive` concurrently
+         until the WebSocket closes or Nova Sonic errors.
+
+    The legacy `auth` text-frame protocol is gone — the session ID is
+    the only identity carrier. The bridge can no longer send arbitrary
+    JSON on the wire; only binary PCM frames in, and the agent's
+    `streamAudio` envelopes out.
     """
-    # Double-print for visibility — print() bypasses the logging subsystem
-    # which the Bedrock AgentCore Runtime platform sometimes tees to
-    # CloudWatch through a different path than stdout.
     print("[telephony_agent] /ws endpoint hit", flush=True)
     await websocket.accept()
     print("[telephony_agent] websocket accepted", flush=True)
     logger.info("websocket accepted", extra={"client": str(websocket.client)})
 
     voice_id = websocket.query_params.get("voice_id", "tiffany")
+    # Read the session id from the custom-header pass-through that
+    # AgentCore Runtime forwards from the URL query string. Falls back
+    # to the official query-param name (and HTTP header) for local-
+    # dev / non-AgentCore paths where the custom-header rewrite is not
+    # in effect.
+    session_id = (
+        websocket.headers.get(SESSION_ID_CUSTOM_HEADER_LOWER)
+        or websocket.headers.get(SESSION_ID_HEADER)
+        or websocket.query_params.get(SESSION_ID_HEADER)
+    )
+    print(
+        f"[telephony_agent] /ws session_id={session_id!r} voice_id={voice_id!r}",
+        flush=True,
+    )
 
     mcp_client: Optional[MCPClient] = None
     agent: Optional[BidiAgent] = None
+    session: Optional[Session] = None
+    warm: Optional[WarmSession] = None
 
     try:
-        # ───── Step 2: auth metadata (first text frame) ─────
-        try:
-            first_text = await websocket.receive_text()
-        except Exception as exc:
-            logger.warning("no auth metadata on first frame", extra={"err": str(exc)})
-            await websocket.close(code=1008)
-            return
+        # ───── Pre-warm cache lookup ─────
+        if session_id:
+            warm = _warm_sessions.pop(session_id, None)
+            if warm is not None:
+                logger.info(
+                    "ws attached to warm session",
+                    extra={
+                        "session_id": session_id,
+                        "call_id": warm.session.call_id,
+                        "customer_id": warm.session.customer_id,
+                        "warm_cache_size": len(_warm_sessions),
+                    },
+                )
+                print(
+                    f"[telephony_agent] ws warm-hit call_id={warm.session.call_id}",
+                    flush=True,
+                )
+                session = warm.session
+                agent = warm.agent
+                mcp_client = warm.mcp_client
+            else:
+                logger.warning(
+                    "ws session_id miss; falling back to anonymous cold-start",
+                    extra={"session_id": session_id},
+                )
 
-        session = parse_auth_metadata(first_text)
-
-        # ───── Scanner-abuse short-circuit ─────
-        #
-        # The public NLB is reachable by SIP scanners that probe with
-        # fake usernames (`sip:sommer:sommer@...`, `sip:voxbox:...`).
-        # Legitimate calls routed through Chime Voice Connector always
-        # arrive with an E.164 caller ID. If the caller_from didn't
-        # normalize to E.164, it's almost certainly a scanner — close
-        # immediately rather than burning Nova Sonic / MCP resources
-        # on a session that can't order anything anyway.
-        if session.anonymous and not session.raw_from:
-            # Empty caller_from (withheld Caller ID) is a legitimate
-            # anonymous call — keep it running.
-            pass
-        elif session.anonymous:
-            logger.warning(
-                "scanner-like caller_from; closing early",
-                extra={"call_id": session.call_id, "from_last4": session.from_last4},
-            )
+        # ───── Cold-start fallback ─────
+        if warm is None:
+            # Either the bridge didn't pass a session_id (pre-step-3
+            # deploy state), or the warmup never happened, or the
+            # microVM was recycled between warmup and /ws connect.
+            # Build an anonymous session so the call still works.
             try:
-                await websocket.close(code=1008)
+                customer_id, anonymous, from_last4 = (
+                    pstn_customer.derive_for_session("")
+                )
             except Exception:
-                pass
-            return
-
-        # ───── Resolve the per-call system prompt ─────
-        #
-        # Invoke the prompt-renderer Lambda concurrently with Nova Sonic /
-        # MCP discovery so the ~50-200 ms renderer call hides behind
-        # those already-running tasks. On any renderer failure we fall
-        # back to the container-baked `system_prompt.build(session)` so
-        # the call still works — just without the loyalty greeting.
-        renderer_task = asyncio.create_task(
-            prompt_renderer.fetch(session.raw_from, session.customer_id),
-            name=f"renderer-{session.call_id}",
-        )
-
-        # ───── Step 3: build the BidiAgent ─────
-        # Strands AudioConfig accepts `input_rate` / `output_rate` keys,
-        # NOT `input_sample_rate` / `output_sample_rate`. The wrong keys
-        # are silently ignored — verify by reading the type at
-        # https://github.com/strands-agents/sdk-python/blob/v1.37.0/src/strands/experimental/bidi/types/model.py
-        # — and the SDK falls through to its built-in defaults
-        # (16 kHz both ways, voice "matthew"). Until this commit the
-        # `voice_id` query param was being silently dropped too.
-        #
-        # We keep input at 16 kHz (the bridge upsamples 8 kHz μ-law
-        # from PSTN to 16 kHz LPCM before forwarding) because the
-        # AudioSampleRate type literal in strands is
-        # `Literal[16000, 24000, 48000]` and 8000 is not a permitted
-        # value, even though Nova Sonic itself accepts 8000 per the
-        # API docs. Switching to native 8 kHz input would also require
-        # removing the bridge's upsample stage. Tracked for a follow-up.
-        #
-        # turn_detection.endpointingSensitivity is a Nova 2-only knob:
-        # MEDIUM is the documented default for conversational use; HIGH
-        # makes the model end turns aggressively (good for chatty
-        # callers) and LOW lets pauses sit before the model jumps in.
-        # Setting it explicitly so future readers don't have to guess.
-        model = BidiNovaSonicModel(
-            model_id=os.environ.get("NOVA_SONIC_MODEL_ID", "amazon.nova-2-sonic-v1:0"),
-            region=os.environ.get("AWS_REGION", "us-east-1"),
-            provider_config={
-                "audio": {
-                    "input_rate": MODEL_INPUT_SAMPLE_RATE,
-                    "output_rate": MODEL_OUTPUT_SAMPLE_RATE,
-                    "channels": MODEL_CHANNELS,
-                    "voice": voice_id,
-                },
-                "turn_detection": {
-                    "endpointingSensitivity": "MEDIUM",
-                },
-            },
-        )
-
-        mcp_client, tools = _discover_tools(session.customer_id)
-
-        # Resolve the renderer task — by now Nova Sonic + MCP setup has
-        # burned ~1-2 seconds, so the renderer response is almost
-        # certainly ready.
-        try:
-            rendered = await renderer_task
-            resolved_prompt = rendered.system_prompt
-            session.customer_name = rendered.customer_name
-            session.is_loyalty = rendered.is_loyalty
-            logger.info(
-                "prompt resolved from renderer",
-                extra={
-                    "call_id": session.call_id,
-                    "is_loyalty": rendered.is_loyalty,
-                    "has_name": rendered.customer_name is not None,
-                    "prompt_len": len(resolved_prompt),
-                },
+                customer_id, anonymous, from_last4 = pstn_customer.derive("", b"")
+            session = Session(
+                call_id="",
+                raw_from="",
+                from_last4=from_last4,
+                anonymous=anonymous,
+                customer_id=customer_id,
             )
-        except Exception as exc:
-            logger.warning(
-                "prompt-renderer call failed; falling back to local template",
-                extra={"call_id": session.call_id, "err": str(exc)},
+            print(
+                f"[telephony_agent] ws cold-fallback customer_id={session.customer_id}",
+                flush=True,
             )
-            resolved_prompt = system_prompt.build(session)
+            warm = await _build_call_context(session, voice_id)
+            agent = warm.agent
+            mcp_client = warm.mcp_client
 
-        agent = BidiAgent(
-            model=model,
-            tools=tools,
-            system_prompt=resolved_prompt,
-            hooks=[mcp_tools.customer_id_hook(session.customer_id)],
-        )
-
-        # Manual start + send + receive loop — the documented pattern
-        # from https://strandsagents.com/docs/user-guide/concepts/
-        # bidirectional-streaming/quickstart/ ("Manual Start and Stop").
-        # The `inputs=/outputs=` form of agent.run() doesn't match our
-        # wire protocol (binary PCM up, streamAudio JSON down), so we
-        # drive the agent directly.
-        await agent.start()
-        logger.info("bidi agent started", extra={"call_id": session.call_id})
-        print(f"[telephony_agent] bidi agent started call_id={session.call_id}", flush=True)
-
-        # Prime Nova Sonic — `agent.send(str)` is the documented way to
-        # inject user text into a live bidi session.  The model treats
-        # it as if the user had said "Hi" and responds accordingly.
-        print(f"[telephony_agent] priming with Hi call_id={session.call_id}", flush=True)
-        await agent.send("Hi")
-        print(f"[telephony_agent] primed call_id={session.call_id}", flush=True)
+        # Note: `_build_call_context` already called `agent.start()` and
+        # primed Nova Sonic with "Hi" so the model is ready to greet
+        # the caller the moment audio frames start arriving. No second
+        # prime needed here.
 
         # Two concurrent loops:
         #   - _read_loop: pulls PCM binary frames off the WS, forwards

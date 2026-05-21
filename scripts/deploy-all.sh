@@ -901,6 +901,21 @@ if [ -z "$PHONE" ]; then
   exit 5
 fi
 
+# Pull the customer-id pepper SSM parameter ARN from the agent-runtime
+# outputs. Threaded into IngressStack so the SMA Lambda can read the
+# same pepper the agent reads, which is the prerequisite for the
+# pre-warm path to compute identical session ids on both sides.
+PEPPER_PARAM_ARN=$(json_val "$WORKSPACE_ROOT/$OUTPUTS_DIR/tel-agent-runtime.json" "AgentRuntimeStack" "CustomerIdPepperParameterName")
+# Voice id default — operators can override via env var. Must match the
+# value the SIP gateway uses on its wss query string (also "tiffany"
+# per the SipGatewayStack default).
+INGRESS_VOICE_ID="${INGRESS_VOICE_ID:-tiffany}"
+
+if [ -z "$RUNTIME_ARN" ] || [ -z "$PEPPER_PARAM_ARN" ]; then
+  print_warning "tel-agent-runtime.json missing AgentRuntimeArn or CustomerIdPepperParameterName"
+  print_info    "IngressStack will deploy WITHOUT the pre-warm wiring; SMA Lambda will log warmup_skipped_no_runtime_arn"
+fi
+
 ################################################################################
 # Layer 10b — IngressStack (deployed as ${PROJECT_PREFIX}-IngressStack)
 # VC + SMA + SMA Lambda + SIP rule. Consumes PhoneNumberE164 from 10a.
@@ -919,6 +934,9 @@ if should_deploy tel-ingress; then
       --parameters "IngressStack:DeploymentPrefix=${PROJECT_PREFIX}" \
       --parameters "IngressStack:SipGatewayNlbDnsName=${SIP_GATEWAY_NLB_DNS}" \
       --parameters "IngressStack:PhoneNumberE164=${PHONE}" \
+      --parameters "IngressStack:AgentRuntimeArn=${RUNTIME_ARN}" \
+      --parameters "IngressStack:CustomerIdPepperParameterArn=${PEPPER_PARAM_ARN}" \
+      --parameters "IngressStack:AgentVoiceId=${INGRESS_VOICE_ID}" \
       --outputs-file "$WORKSPACE_ROOT/$OUTPUTS_DIR/tel-ingress.json"
   )
   update_state "tel-ingress" true "{\"prefix\":\"${PROJECT_PREFIX}\"}"

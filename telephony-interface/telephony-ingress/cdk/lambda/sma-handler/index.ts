@@ -57,11 +57,33 @@
  *     The full raw value never appears at INFO or above.
  */
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+// Plain-JS helpers — kept as .js so the deployed Lambda's index.js stays
+// human-readable for hot-edits in the AWS Lambda console (CDK bundling
+// inlines these by reference). Both pure-Node, no third-party deps.
+//
+// `pstn-customer.js` mirrors the agent's Python `pstn_customer.derive`
+// byte-for-byte so the SMA Lambda and the agent compute identical
+// `customerId` values for the same caller.
+//
+// `agentcore-warmup.js` issues the SigV4-signed POST to the AgentCore
+// Runtime `/invocations` endpoint with the session-id header set, so a
+// microVM is allocated to the session BEFORE the SIP INVITE reaches the
+// bridge.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const pstnCustomer = require('./pstn-customer');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const agentcoreWarmup = require('./agentcore-warmup');
 
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 const DEPLOYMENT_PREFIX = process.env.DEPLOYMENT_PREFIX ?? '';
 const VC_ARN_PARAM = process.env.VOICE_CONNECTOR_ARN_PARAM ?? '';
 const LOG_LEVEL = (process.env.LOG_LEVEL ?? 'INFO').toUpperCase();
+
+// AgentCore Runtime warmup config (added in the pre-warm refactor).
+// Threaded in by IngressStack from cdk-outputs/tel-agent-runtime.json.
+const AGENT_RUNTIME_ARN = process.env.AGENT_RUNTIME_ARN ?? '';
+const CUSTOMER_ID_PEPPER_PARAM = process.env.CUSTOMER_ID_PEPPER_PARAMETER_NAME ?? '';
+const AGENT_VOICE_ID = process.env.AGENT_VOICE_ID ?? 'tiffany';
 
 /**
  * CallAndBridge call timeout — max time Chime will wait for the B-leg
@@ -93,6 +115,31 @@ async function getVoiceConnectorArn(): Promise<string> {
   }
   cachedVoiceConnectorArn = value;
   return value;
+}
+
+// Cache the customer-id pepper across warm invocations. Loaded lazily on
+// first use because we want the cold-start path to fail closed (warmup
+// returns anonymous fallback) rather than block the Lambda init.
+let cachedPepper: Buffer | null = null;
+
+async function getCustomerIdPepper(): Promise<Buffer> {
+  if (cachedPepper !== null) return cachedPepper;
+  if (!CUSTOMER_ID_PEPPER_PARAM) {
+    // Empty pepper is safe — pstn-customer.derive accepts Buffer.alloc(0).
+    // The agent's Python helper logs a warning and uses b"" in this case
+    // too, so the JS port stays in sync.
+    logWarn('pepper_param_missing_using_empty', {});
+    cachedPepper = Buffer.alloc(0);
+    return cachedPepper;
+  }
+  const resp = await ssm.send(
+    new GetParameterCommand({ Name: CUSTOMER_ID_PEPPER_PARAM, WithDecryption: true }),
+  );
+  const value = resp.Parameter?.Value ?? '';
+  cachedPepper = Buffer.from(value, 'utf8');
+  // Log only the fact + length, never the value (R18).
+  logInfo('pepper_loaded', { pepperLen: cachedPepper.length });
+  return cachedPepper;
 }
 
 type ChimeParticipant = {
@@ -192,6 +239,7 @@ function logError(message: string, extra: Record<string, unknown>): void {
 
 async function handleNewInboundCall(event: ChimeEvent): Promise<ChimeResponse> {
   const txId = extractTransactionId(event);
+  const aLegCallId = findLegCallId(event, 'LEG-A');
   const from = findCallerFrom(event);
   const sipApplicationId = event.CallDetails?.SipApplicationId ?? '';
 
@@ -213,6 +261,85 @@ async function handleNewInboundCall(event: ChimeEvent): Promise<ChimeResponse> {
     return respond([{ Type: 'Hangup' }]);
   }
 
+  // ───── Pre-warm AgentCore microVM ─────
+  //
+  // Compute the deterministic session id from the caller's E.164 +
+  // server-side pepper, then issue a SigV4-signed POST to the
+  // AgentCore Runtime /invocations endpoint with that session id in
+  // the X-Amzn-Bedrock-AgentCore-Runtime-Session-Id header. AgentCore
+  // pins the microVM to that session id ("microVM stickiness"); when
+  // the bridge later opens its wss connection with the same id it
+  // attaches to the same warm container.
+  //
+  // Awaited so the phone keeps ringing while the agent finishes its
+  // per-call setup (prompt render + Nova Sonic stream open + MCP tool
+  // discovery + BidiAgent.start + prime-with-Hi). Failure here is
+  // logged but NOT propagated — the bridge's /ws handler has a cold-
+  // start fallback path so the call still completes (anonymous mode).
+  let sessionId: string | null = null;
+  if (AGENT_RUNTIME_ARN) {
+    try {
+      const pepper = await getCustomerIdPepper();
+      const derived = pstnCustomer.derive(from, pepper);
+      sessionId = derived.sessionId;
+      if (sessionId) {
+        const warmupBody = {
+          type: 'warmup',
+          raw_from: from,
+          anonymous: derived.anonymous,
+          from_last4: derived.fromLast4,
+          call_id: aLegCallId,
+          voice_id: AGENT_VOICE_ID,
+        };
+        const startedAt = Date.now();
+        const result = await agentcoreWarmup.warmup({
+          runtimeArn: AGENT_RUNTIME_ARN,
+          region: REGION,
+          sessionId,
+          body: warmupBody,
+        });
+        const elapsedMs = Date.now() - startedAt;
+        if (result.status === 200) {
+          logInfo('warmup_ok', {
+            transactionId: txId,
+            fromLast4: derived.fromLast4,
+            customerId: derived.customerId,
+            elapsedMs,
+          });
+        } else {
+          logWarn('warmup_non_200', {
+            transactionId: txId,
+            fromLast4: derived.fromLast4,
+            status: result.status,
+            elapsedMs,
+            // Body intentionally trimmed — may contain stack traces from
+            // the agent that include unrelated identifiers.
+            bodyHead: (result.body ?? '').slice(0, 200),
+          });
+        }
+      } else {
+        // Anonymous caller — sessionId null by design. Fall through to
+        // CallAndBridge without warmup; bridge takes the cold-start
+        // path and the agent uses anonymous mode.
+        logInfo('warmup_skipped_anonymous_caller', { transactionId: txId });
+      }
+    } catch (err: unknown) {
+      // Best-effort warmup. Log + continue. The bridge's /ws cold path
+      // handles a missing warm-cache entry by building an anonymous
+      // session, so the call completes either way.
+      logWarn('warmup_failed', {
+        transactionId: txId,
+        error: (err as Error)?.message ?? String(err),
+      });
+      sessionId = null;
+    }
+  } else {
+    // AGENT_RUNTIME_ARN env var not set — pre-pre-warm-deploy state.
+    // Leave sessionId null; CallAndBridge proceeds without the SIP
+    // header and the bridge falls through to the anonymous path.
+    logInfo('warmup_skipped_no_runtime_arn', { transactionId: txId });
+  }
+
   // CallAndBridge to the VC. The Uri is the caller's E.164 — it's the
   // user-part of the SIP Request-URI on the B-leg and shows up in SIP
   // logs as a traceable breadcrumb. The Arn identifies the target VC;
@@ -222,19 +349,36 @@ async function handleNewInboundCall(event: ChimeEvent): Promise<ChimeResponse> {
   // CallerIdNumber: Chime requires either a number we own or the A-leg
   // `From`. We use the A-leg `From` (the original caller) so outbound
   // Caller Identification presentation matches the originating caller.
+  //
+  // SipHeaders: when we successfully pre-warmed an AgentCore microVM,
+  // we ride the session id forward on the CallAndBridge action so the
+  // SIP gateway sees it on the INVITE headers and feeds it to its wss
+  // connection. Per
+  // https://docs.aws.amazon.com/chime-sdk/latest/dg/call-and-bridge.html
+  // SipHeaders is a top-level parameter of the action (sibling of
+  // Endpoints), NOT a property of the endpoint object. Earlier
+  // attempts placed it inside the endpoint and Chime silently dropped
+  // the field. Limits per https://docs.aws.amazon.com/chime-sdk/latest/dg/sip-headers.html:
+  // ≤20 entries (analogous to CreateSipMediaApplicationCall API), each
+  // value ≤2048 characters, custom names must start with X-, and X-AMZN
+  // is reserved.
+  const bridgeParams: Record<string, unknown> = {
+    CallTimeoutSeconds: CALL_BRIDGE_TIMEOUT_SECONDS,
+    CallerIdNumber: from,
+    Endpoints: [
+      {
+        BridgeEndpointType: 'AWS',
+        Arn: vcArn,
+        Uri: from || 'agent',
+      },
+    ],
+  };
+  if (sessionId) {
+    bridgeParams.SipHeaders = { 'X-Session-Id': sessionId };
+  }
   const bridge: ChimeAction = {
     Type: 'CallAndBridge',
-    Parameters: {
-      CallTimeoutSeconds: CALL_BRIDGE_TIMEOUT_SECONDS,
-      CallerIdNumber: from,
-      Endpoints: [
-        {
-          BridgeEndpointType: 'AWS',
-          Arn: vcArn,
-          Uri: from || 'agent',
-        },
-      ],
-    },
+    Parameters: bridgeParams,
   };
   return respond([bridge]);
 }

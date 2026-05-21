@@ -15,11 +15,10 @@
  * with SigV4 POST. That keeps the Docker image slim.
  */
 
-const crypto = require('node:crypto');
 const { getCredentials } = require('./aws-credentials');
+const { signPostHeaders } = require('./sigv4');
 const logger = require('./logger');
 
-const ALGORITHM = 'AWS4-HMAC-SHA256';
 const SERVICE = 'monitoring';
 
 let activeCallCount = 0;
@@ -61,86 +60,6 @@ function recordOutboundUnderflow() {
   outboundUnderflowSinceFlush += 1;
 }
 
-function hmac(key, data) {
-  return crypto.createHmac('sha256', key).update(data).digest();
-}
-
-function sha256Hex(data) {
-  return crypto.createHash('sha256').update(data).digest('hex');
-}
-
-function signPost({ url, region, service, credentials, body }) {
-  const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
-  const dateStamp = amzDate.slice(0, 8);
-  const payloadHash = sha256Hex(body);
-
-  const signedHeadersList = [
-    'content-type',
-    'host',
-    'x-amz-content-sha256',
-    'x-amz-date',
-  ];
-  const canonicalHeaders = {
-    'content-type': 'application/x-www-form-urlencoded; charset=utf-8',
-    host: url.host,
-    'x-amz-content-sha256': payloadHash,
-    'x-amz-date': amzDate,
-  };
-  if (credentials.sessionToken) {
-    signedHeadersList.push('x-amz-security-token');
-    canonicalHeaders['x-amz-security-token'] = credentials.sessionToken;
-  }
-  signedHeadersList.sort();
-  const canonicalHeaderString = signedHeadersList
-    .map((h) => `${h}:${canonicalHeaders[h]}\n`)
-    .join('');
-  const signedHeaders = signedHeadersList.join(';');
-
-  const canonicalRequest = [
-    'POST',
-    url.pathname,
-    '',
-    canonicalHeaderString,
-    signedHeaders,
-    payloadHash,
-  ].join('\n');
-
-  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
-  const stringToSign = [
-    ALGORITHM,
-    amzDate,
-    credentialScope,
-    sha256Hex(canonicalRequest),
-  ].join('\n');
-
-  const kDate = hmac('AWS4' + credentials.secretAccessKey, dateStamp);
-  const kRegion = hmac(kDate, region);
-  const kService = hmac(kRegion, service);
-  const kSigning = hmac(kService, 'aws4_request');
-  const signature = crypto
-    .createHmac('sha256', kSigning)
-    .update(stringToSign)
-    .digest('hex');
-
-  const authorization =
-    `${ALGORITHM} ` +
-    `Credential=${credentials.accessKeyId}/${credentialScope}, ` +
-    `SignedHeaders=${signedHeaders}, ` +
-    `Signature=${signature}`;
-
-  const headers = {
-    'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8',
-    Host: url.host,
-    'X-Amz-Date': amzDate,
-    'X-Amz-Content-Sha256': payloadHash,
-    Authorization: authorization,
-  };
-  if (credentials.sessionToken) {
-    headers['X-Amz-Security-Token'] = credentials.sessionToken;
-  }
-  return headers;
-}
-
 async function flushOnce({ region, namespace }) {
   const url = new URL(`https://monitoring.${region}.amazonaws.com/`);
   const now = new Date().toISOString();
@@ -175,7 +94,7 @@ async function flushOnce({ region, namespace }) {
   const body = bodyParams.toString();
 
   const credentials = await getCredentials();
-  const headers = signPost({
+  const headers = signPostHeaders({
     url,
     region,
     service: SERVICE,
