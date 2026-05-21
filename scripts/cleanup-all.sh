@@ -560,30 +560,17 @@ if [ "$DRY_RUN" = true ]; then
   print_info "Run without --dry-run to actually delete resources"
 elif [ "$OVERALL_SUCCESS" = true ]; then
   # ───────────── Post-cleanup auto-heal sweep ─────────────
-  # Per working agreement #9: clean up the orphan artifacts that survive
-  # `cdk destroy` so the NEXT deploy doesn't trip over them.
-  PROJECT_PREFIX="${PROJECT_PREFIX:-dev}"
-
-  # 1. Orphan log groups (Lambda/CodeBuild/ECS/API Gateway create these
-  #    lazily at first invocation; CDK never owned them, never deletes
-  #    them).
-  print_info "Auto-heal: sweeping orphan log groups under prefix '${PROJECT_PREFIX}'..."
-  ORPHAN_LGS=$(aws logs describe-log-groups --region us-east-1 \
-    --query "logGroups[?starts_with(logGroupName, '/aws/lambda/${PROJECT_PREFIX}-') \
-      || starts_with(logGroupName, '/aws/codebuild/${PROJECT_PREFIX}-') \
-      || starts_with(logGroupName, '/ecs/${PROJECT_PREFIX}-') \
-      || starts_with(logGroupName, '/aws/apigateway/${PROJECT_PREFIX}-')].logGroupName" \
-    --output text 2>/dev/null || true)
-  if [ -n "$ORPHAN_LGS" ]; then
-    for lg in $ORPHAN_LGS; do
-      aws logs delete-log-group --region us-east-1 --log-group-name "$lg" 2>/dev/null || true
-      echo "  deleted: $lg"
-    done
-  fi
-
-  # 2. Synthetic-data output JSONs (gitignored, but still pollute the
-  #    working tree; the synthetic-data layer regenerates them on the
-  #    next deploy anyway).
+  # Every Lambda, CodeBuild project, ECS task definition, and API Gateway
+  # access log in this project pre-creates its CloudWatch log group through
+  # CDK with `RemovalPolicy.DESTROY`. `cdk destroy` deletes them
+  # symmetrically — no orphan log groups to chase. We deliberately do NOT
+  # run a prefix-wide log-group sweep here: an earlier version did, but it
+  # also nuked CDK-managed groups, leaving CFN with DELETED-drift on those
+  # resources and the awslogs driver silently dropping logs into the void.
+  # Fix that kind of leak in the CDK code, not by best-effort sweeps here.
+  # Synthetic-data output JSONs (gitignored, but still pollute the working
+  # tree; the synthetic-data layer regenerates them on the next deploy
+  # anyway).
   if [ -d "$WORKSPACE_ROOT/backend/synthetic-data/output" ]; then
     rm -f "$WORKSPACE_ROOT/backend/synthetic-data/output/"*.json 2>/dev/null || true
     print_info "Auto-heal: removed stale synthetic-data output JSONs"

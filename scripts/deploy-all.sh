@@ -356,52 +356,25 @@ fi
 print_info "Bedrock AgentCore-supported AZs in this account: $AGENTCORE_AZS"
 
 ################################################################################
-# Auto-heal: remove orphan dev-prefix log groups + stuck CFN stacks before
-# the deploy starts. Per working agreement #9: scripts must auto-heal where
-# possible.
+# Pre-deploy auto-heal: clear stuck CFN stack states only.
 #
-# Note: every Lambda, CodeBuild project, and ECS task definition in this
-# project pre-creates its CloudWatch log group through CDK with
-# `RemovalPolicy.DESTROY`, so `cdk destroy` cleans them up symmetrically.
-# This preflight sweep is a belt-and-suspenders fallback for two cases that
-# can still leak orphans:
-#
-#   1. An older deployment that ran BEFORE every Lambda gained an explicit
-#      `logGroup:` binding may have left lazily-created log groups behind.
-#      Those orphans block the new deploy with
-#      "Resource of type AWS::Logs::LogGroup ... already exists".
-#   2. A future Lambda or CodeBuild project added without the explicit
-#      binding could repeat the same trap; the sweep auto-heals it on the
-#      next deploy.
-#
-# Stuck CFN stacks (REVIEW_IN_PROGRESS / ROLLBACK_COMPLETE) from a prior
+# CFN stacks left in REVIEW_IN_PROGRESS / ROLLBACK_COMPLETE from a prior
 # failed deploy block re-creation. CFN refuses `update-stack` on those
 # statuses; the stack must be deleted first.
+#
+# What we DO NOT do anymore: log group sweep. Every Lambda, CodeBuild
+# project, ECS task definition, and API Gateway access log in this
+# project pre-creates its CloudWatch log group through CDK with
+# `RemovalPolicy.DESTROY`. CFN owns the lifecycle on both ends —
+# create on deploy, delete on destroy, no orphans. The earlier
+# preflight log group sweep was over-aggressive: it deleted
+# CDK-managed log groups on every redeploy, putting the stack into
+# DELETED-drift on the LogGroup resources. CFN does not recreate
+# DELETED-drift resources on a no-op update, so the awslogs driver
+# silently dropped logs into the void until the next stack-replacing
+# change. If a future Lambda is added without the explicit binding,
+# fix the CDK code rather than papering over it here.
 ################################################################################
-preflight_log_group_sweep() {
-  local prefix="$1"
-  local lgs
-  # Patterns covering every project-owned log namespace.
-  lgs=$(aws logs describe-log-groups --region us-east-1 \
-    --query "logGroups[?starts_with(logGroupName, '/aws/lambda/${prefix}-') \
-      || starts_with(logGroupName, '/aws/codebuild/${prefix}-') \
-      || starts_with(logGroupName, '/ecs/${prefix}-') \
-      || starts_with(logGroupName, '/aws/apigateway/${prefix}-')].logGroupName" \
-    --output text 2>/dev/null || true)
-  if [ -z "$lgs" ]; then
-    print_info "Auto-heal: no orphan log groups for prefix '${prefix}'"
-    return 0
-  fi
-  print_warning "Auto-heal: found orphan log groups for prefix '${prefix}', deleting..."
-  for lg in $lgs; do
-    if aws logs delete-log-group --region us-east-1 --log-group-name "$lg" 2>/dev/null; then
-      echo "    deleted: $lg"
-    else
-      echo "    skipped (delete failed): $lg"
-    fi
-  done
-}
-
 preflight_stuck_stack_sweep() {
   local stuck_statuses="REVIEW_IN_PROGRESS ROLLBACK_COMPLETE"
   local project_stacks="DynamoDBStack LocationStack LambdaStack ApiGatewayStack \
@@ -421,7 +394,6 @@ preflight_stuck_stack_sweep() {
 
 print_section "Pre-deploy auto-heal sweep"
 preflight_stuck_stack_sweep
-preflight_log_group_sweep "$PROJECT_PREFIX"
 
 ################################################################################
 # Resolve an available Chime phone-number search spec for Layer 10a
