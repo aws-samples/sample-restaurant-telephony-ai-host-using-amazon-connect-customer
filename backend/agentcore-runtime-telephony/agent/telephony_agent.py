@@ -259,15 +259,40 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         )
 
         # ───── Step 3: build the BidiAgent ─────
+        # Strands AudioConfig accepts `input_rate` / `output_rate` keys,
+        # NOT `input_sample_rate` / `output_sample_rate`. The wrong keys
+        # are silently ignored — verify by reading the type at
+        # https://github.com/strands-agents/sdk-python/blob/v1.37.0/src/strands/experimental/bidi/types/model.py
+        # — and the SDK falls through to its built-in defaults
+        # (16 kHz both ways, voice "matthew"). Until this commit the
+        # `voice_id` query param was being silently dropped too.
+        #
+        # We keep input at 16 kHz (the bridge upsamples 8 kHz μ-law
+        # from PSTN to 16 kHz LPCM before forwarding) because the
+        # AudioSampleRate type literal in strands is
+        # `Literal[16000, 24000, 48000]` and 8000 is not a permitted
+        # value, even though Nova Sonic itself accepts 8000 per the
+        # API docs. Switching to native 8 kHz input would also require
+        # removing the bridge's upsample stage. Tracked for a follow-up.
+        #
+        # turn_detection.endpointingSensitivity is a Nova 2-only knob:
+        # MEDIUM is the documented default for conversational use; HIGH
+        # makes the model end turns aggressively (good for chatty
+        # callers) and LOW lets pauses sit before the model jumps in.
+        # Setting it explicitly so future readers don't have to guess.
         model = BidiNovaSonicModel(
             model_id=os.environ.get("NOVA_SONIC_MODEL_ID", "amazon.nova-2-sonic-v1:0"),
             region=os.environ.get("AWS_REGION", "us-east-1"),
             provider_config={
                 "audio": {
-                    "input_sample_rate": MODEL_INPUT_SAMPLE_RATE,
-                    "output_sample_rate": MODEL_OUTPUT_SAMPLE_RATE,
+                    "input_rate": MODEL_INPUT_SAMPLE_RATE,
+                    "output_rate": MODEL_OUTPUT_SAMPLE_RATE,
+                    "channels": MODEL_CHANNELS,
                     "voice": voice_id,
-                }
+                },
+                "turn_detection": {
+                    "endpointingSensitivity": "MEDIUM",
+                },
             },
         )
 
