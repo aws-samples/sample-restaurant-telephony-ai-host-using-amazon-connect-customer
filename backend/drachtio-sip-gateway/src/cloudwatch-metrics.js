@@ -23,6 +23,8 @@ const ALGORITHM = 'AWS4-HMAC-SHA256';
 const SERVICE = 'monitoring';
 
 let activeCallCount = 0;
+let outboundDropQueueFullSinceFlush = 0;
+let outboundUnderflowSinceFlush = 0;
 let flushInterval = null;
 
 function incrementActiveCalls() {
@@ -31,6 +33,32 @@ function incrementActiveCalls() {
 
 function decrementActiveCalls() {
   if (activeCallCount > 0) activeCallCount -= 1;
+}
+
+/**
+ * Increment the OutboundDropQueueFull counter. Flushed every interval
+ * as a `Sum` (Count) datum and reset to 0 after the flush so each
+ * datapoint represents drops in that window.
+ *
+ * Production-safe: a non-zero value here is the canonical signal that
+ * the producer-side pacer (telephony_agent.py `_write_loop`) has
+ * regressed and Nova Sonic audio is outpacing the 20 ms RTP drain.
+ * Recommended CloudWatch alarm: Sum > 0 over 5 minutes.
+ */
+function recordOutboundDropQueueFull() {
+  outboundDropQueueFullSinceFlush += 1;
+}
+
+/**
+ * Increment the OutboundUnderflows counter. Flushed every interval as
+ * a `Sum` (Count) and reset.
+ *
+ * A small steady-state count is normal (single-packet WS jitter); a
+ * large or sustained count indicates the producer is too SLOW or the
+ * cushion (`initialBufferFrames`) is undersized.
+ */
+function recordOutboundUnderflow() {
+  outboundUnderflowSinceFlush += 1;
 }
 
 function hmac(key, data) {
@@ -116,6 +144,17 @@ function signPost({ url, region, service, credentials, body }) {
 async function flushOnce({ region, namespace }) {
   const url = new URL(`https://monitoring.${region}.amazonaws.com/`);
   const now = new Date().toISOString();
+
+  // Snapshot + reset the counters BEFORE the network call so calls
+  // that fire during the round-trip don't get dropped if the request
+  // succeeds. If the request FAILS we deliberately drop these counts
+  // (the `catch` branch in the interval) — under-counting is safer
+  // than spamming a stuck endpoint.
+  const dropsThisWindow = outboundDropQueueFullSinceFlush;
+  const underflowsThisWindow = outboundUnderflowSinceFlush;
+  outboundDropQueueFullSinceFlush = 0;
+  outboundUnderflowSinceFlush = 0;
+
   const bodyParams = new URLSearchParams({
     Action: 'PutMetricData',
     Version: '2010-08-01',
@@ -124,6 +163,14 @@ async function flushOnce({ region, namespace }) {
     'MetricData.member.1.Timestamp': now,
     'MetricData.member.1.Value': String(activeCallCount),
     'MetricData.member.1.Unit': 'Count',
+    'MetricData.member.2.MetricName': 'OutboundDropQueueFull',
+    'MetricData.member.2.Timestamp': now,
+    'MetricData.member.2.Value': String(dropsThisWindow),
+    'MetricData.member.2.Unit': 'Count',
+    'MetricData.member.3.MetricName': 'OutboundUnderflows',
+    'MetricData.member.3.Timestamp': now,
+    'MetricData.member.3.Value': String(underflowsThisWindow),
+    'MetricData.member.3.Unit': 'Count',
   });
   const body = bodyParams.toString();
 
@@ -168,6 +215,8 @@ function stop() {
 module.exports = {
   incrementActiveCalls,
   decrementActiveCalls,
+  recordOutboundDropQueueFull,
+  recordOutboundUnderflow,
   start,
   stop,
 };

@@ -157,6 +157,8 @@ async function handleInvite({ req, res, srf, portPool, agentConfig }) {
       },
       initialRemoteHost: callerPeer.host,
       initialRemotePort: callerPeer.port,
+      onOutboundDropQueueFull: () => cloudwatch.recordOutboundDropQueueFull(),
+      onOutboundUnderflow: () => cloudwatch.recordOutboundUnderflow(),
     });
     await bridge.start();
 

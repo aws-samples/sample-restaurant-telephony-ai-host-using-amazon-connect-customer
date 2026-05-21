@@ -372,87 +372,265 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             except WebSocketDisconnect:
                 raise
 
+        # Outbound audio queue + interrupt flag for the paced writer
+        # task. The dispatcher (`_write_loop_inline`) NEVER blocks on
+        # send pacing — it pushes envelopes onto this queue and moves
+        # on to the next agent event. The paced writer task
+        # (`_paced_writer_inline`) drains the queue, applies the 1x
+        # realtime sleep, then writes to the WebSocket.
+        #
+        # Why decouple: a previous version of this loop called
+        # `_send_audio_paced` directly from the dispatcher. Each
+        # `await asyncio.sleep(60ms)` pinned the dispatcher for one
+        # frame, so a 1.8 s burst from Nova Sonic took 1.8 s of
+        # serialised dispatcher time before the next event could
+        # surface. `BidiInterruptionEvent` (the barge-in signal) sat
+        # behind the audio chunks in the dispatcher's read queue and
+        # only fired AFTER the burst drained — meaning the agent did
+        # not react to the caller talking until ~2 s after they
+        # started. Phones experienced as "agent ignores barge-in".
+        #
+        # The fix: dispatcher pushes onto an `asyncio.Queue`,
+        # interrupts toggle a flag the writer checks before each send.
+        # The writer is the only place that sleeps; the dispatcher
+        # stays responsive.
+        outbound_queue: "asyncio.Queue[Optional[bytes]]" = asyncio.Queue()
+        # `interrupt_seq` increments every time the dispatcher fires
+        # a barge-in. Writer captures the current value when it pops
+        # an envelope and checks again before sending — if changed,
+        # it drops the envelope. Using a counter (not a bool) avoids
+        # races where two interrupts arrive while the writer is mid-send.
+        interrupt_seq = 0
+        # Sentinel pushed onto the queue to signal "shutdown gracefully".
+        WRITER_STOP = b""
+
         async def _write_loop_inline():
-            nonlocal aggregator
+            nonlocal aggregator, interrupt_seq
             event_count = 0
-            async for event in agent.receive():
-                event_count += 1
-                if event_count <= 5 or event_count % 50 == 0:
-                    print(
-                        f"[telephony_agent] event#{event_count} type={type(event).__name__} "
-                        f"call_id={session.call_id}",
-                        flush=True,
-                    )
-                if isinstance(event, BidiAudioStreamEvent):
-                    pcm = aggregator.feed(event.audio)
-                    if pcm is not None:
-                        await websocket.send_json(build_stream_audio_envelope(pcm))
-                elif isinstance(event, (BidiResponseCompleteEvent, BidiInterruptionEvent)):
-                    pcm = aggregator.flush()
-                    if pcm is not None:
-                        await websocket.send_json(build_stream_audio_envelope(pcm))
-                    if isinstance(event, BidiInterruptionEvent):
-                        # Tell the Node bridge to wipe its outbound
-                        # queue so stale audio stops immediately.
-                        try:
-                            await websocket.send_json({"type": "bargeIn"})
-                        except Exception:
-                            pass
-                        logger.info(
-                            "agent interrupted",
-                            extra={"call_id": session.call_id, "reason": event.reason},
-                        )
-                elif isinstance(event, BidiTranscriptStreamEvent):
-                    if event.is_final:
-                        role = event.role
-                        text = event.text
-                        # Print transcripts so we can see the conversation
-                        # in the CloudWatch log (logger extras don't render).
+            try:
+                async for event in agent.receive():
+                    event_count += 1
+                    if event_count <= 5 or event_count % 50 == 0:
                         print(
-                            f"[telephony_agent] transcript role={role} "
-                            f"call_id={session.call_id} text={text[:200]!r}",
+                            f"[telephony_agent] event#{event_count} type={type(event).__name__} "
+                            f"call_id={session.call_id}",
                             flush=True,
                         )
-                        logger.info(
-                            "transcript",
+                    if isinstance(event, BidiAudioStreamEvent):
+                        pcm = aggregator.feed(event.audio)
+                        if pcm is not None:
+                            outbound_queue.put_nowait(pcm)
+                    elif isinstance(event, (BidiResponseCompleteEvent, BidiInterruptionEvent)):
+                        pcm = aggregator.flush()
+                        if pcm is not None:
+                            outbound_queue.put_nowait(pcm)
+                        if isinstance(event, BidiInterruptionEvent):
+                            # Bump the interrupt counter so any
+                            # in-flight or queued audio is dropped by
+                            # the writer. Then drain whatever is
+                            # already buffered in the queue
+                            # synchronously (cheap — no awaits) so
+                            # the writer doesn't waste a paced sleep
+                            # on an envelope it would discard anyway.
+                            interrupt_seq += 1
+                            drained = 0
+                            while not outbound_queue.empty():
+                                try:
+                                    outbound_queue.get_nowait()
+                                    outbound_queue.task_done()
+                                    drained += 1
+                                except asyncio.QueueEmpty:
+                                    break
+                            # Tell the bridge to wipe ITS queue too.
+                            try:
+                                await websocket.send_json({"type": "bargeIn"})
+                            except Exception:
+                                pass
+                            logger.info(
+                                "agent interrupted",
+                                extra={
+                                    "call_id": session.call_id,
+                                    "reason": event.reason,
+                                    "drained_envelopes": drained,
+                                },
+                            )
+                    elif isinstance(event, BidiTranscriptStreamEvent):
+                        if event.is_final:
+                            role = event.role
+                            text = event.text
+                            # Print transcripts so we can see the conversation
+                            # in the CloudWatch log (logger extras don't render).
+                            print(
+                                f"[telephony_agent] transcript role={role} "
+                                f"call_id={session.call_id} text={text[:200]!r}",
+                                flush=True,
+                            )
+                            logger.info(
+                                "transcript",
+                                extra={
+                                    "call_id": session.call_id,
+                                    "role": role,
+                                    "text": text,
+                                },
+                            )
+                    elif isinstance(event, ToolUseStreamEvent):
+                        # Diagnostic: Nova Sonic requested a tool. Log the
+                        # tool name + arguments so we can confirm the model
+                        # is actually attempting tool calls (and what args
+                        # it is passing). Previously we silently dropped
+                        # these events; seeing zero of them in the log was
+                        # the clue that tools were not reaching the model.
+                        tu = event.get("current_tool_use", {}) or {}
+                        print(
+                            f"[telephony_agent] tool_use name={tu.get('name')!r} "
+                            f"id={tu.get('toolUseId')!r} input={tu.get('input')!r} "
+                            f"call_id={session.call_id}",
+                            flush=True,
+                        )
+                    elif isinstance(event, BidiErrorEvent):
+                        logger.error(
+                            "agent error event",
                             extra={
                                 "call_id": session.call_id,
-                                "role": role,
-                                "text": text,
+                                "code": event.code,
+                                "message": event.message,
                             },
                         )
-                elif isinstance(event, ToolUseStreamEvent):
-                    # Diagnostic: Nova Sonic requested a tool. Log the
-                    # tool name + arguments so we can confirm the model
-                    # is actually attempting tool calls (and what args
-                    # it is passing). Previously we silently dropped
-                    # these events; seeing zero of them in the log was
-                    # the clue that tools were not reaching the model.
-                    tu = event.get("current_tool_use", {}) or {}
-                    print(
-                        f"[telephony_agent] tool_use name={tu.get('name')!r} "
-                        f"id={tu.get('toolUseId')!r} input={tu.get('input')!r} "
-                        f"call_id={session.call_id}",
-                        flush=True,
-                    )
-                elif isinstance(event, BidiErrorEvent):
-                    logger.error(
-                        "agent error event",
-                        extra={
-                            "call_id": session.call_id,
-                            "code": event.code,
-                            "message": event.message,
-                        },
-                    )
-                elif isinstance(event, BidiConnectionCloseEvent):
-                    logger.info(
-                        "agent connection closed",
-                        extra={"call_id": session.call_id, "reason": event.reason},
-                    )
-                    return
+                    elif isinstance(event, BidiConnectionCloseEvent):
+                        logger.info(
+                            "agent connection closed",
+                            extra={"call_id": session.call_id, "reason": event.reason},
+                        )
+                        return
+            finally:
+                # Signal the writer to drain and exit.
+                outbound_queue.put_nowait(WRITER_STOP)
+
+        async def _paced_writer_inline():
+            """Drain `outbound_queue` and write each envelope to the
+            WebSocket at 1x realtime, with idle-gap re-anchoring.
+
+            This is the ONLY coroutine that calls `await asyncio.sleep`
+            for pacing — the dispatcher stays unblocked so it can react
+            to interrupts within microseconds.
+
+            Pacer behaviour:
+              - Re-anchor on every idle gap > IDLE_REANCHOR_GAP_S so
+                tool gaps, response gaps, and turn gaps don't burst.
+              - Re-anchor on every interrupt so the next utterance
+                starts at "now" with no debt.
+              - Drop any envelope older than the current `interrupt_seq`
+                snapshot taken at dequeue.
+
+            Toggle: env var OUTPUT_PACER_ENABLED=false sends each
+            envelope as soon as it's dequeued (no pacing — emergency
+            rollback path).
+            """
+            nonlocal interrupt_seq
+            pacer_enabled = (
+                os.getenv("OUTPUT_PACER_ENABLED", "true").lower() != "false"
+            )
+            pacer_anchor: Optional[float] = None
+            pacer_audio_seconds: float = 0.0
+            pacer_last_send_at: Optional[float] = None
+            # Re-anchor if more than this much wall time elapsed
+            # without a send. 0.5 s is well above the 60 ms aggregator
+            # cadence (so consecutive envelopes inside a single
+            # utterance never trigger) but well below typical tool
+            # round-trips (1-30 s).
+            IDLE_REANCHOR_GAP_S = 0.5
+            # 16 kHz mono * 2 bytes = 32 000 B/s of L16.
+            bytes_per_second = (
+                MODEL_OUTPUT_SAMPLE_RATE * MODEL_CHANNELS * 2
+            )
+            envelopes_skipped_due_to_interrupt = 0
+
+            try:
+                while True:
+                    pcm = await outbound_queue.get()
+                    try:
+                        # Sentinel — graceful shutdown.
+                        if pcm is WRITER_STOP:
+                            return
+                        # Snapshot the interrupt seq AT DEQUEUE.
+                        # If the dispatcher fires barge-in after we
+                        # popped but before we send, the seq differs
+                        # and we drop. The dispatcher also drains the
+                        # queue synchronously on barge-in so most
+                        # envelopes never reach this point.
+                        seq_at_dequeue = interrupt_seq
+                        envelope = build_stream_audio_envelope(pcm)
+                        envelope_seconds = len(pcm) / bytes_per_second
+                        loop = asyncio.get_running_loop()
+                        now = loop.time()
+                        # Re-anchor on idle gap or fresh-after-interrupt.
+                        # `pacer_last_send_at` is None right after a
+                        # _reset_pacer, which we trigger on init AND
+                        # on interrupt-skip below.
+                        if not pacer_enabled:
+                            await websocket.send_json(envelope)
+                            pacer_last_send_at = loop.time()
+                            continue
+                        if (
+                            pacer_anchor is None
+                            or pacer_last_send_at is None
+                            or (now - pacer_last_send_at) > IDLE_REANCHOR_GAP_S
+                        ):
+                            if pacer_anchor is not None:
+                                gap_s = now - (pacer_last_send_at or now)
+                                logger.info(
+                                    "pacer re-anchored on idle gap",
+                                    extra={
+                                        "call_id": session.call_id,
+                                        "gap_seconds": round(gap_s, 3),
+                                    },
+                                )
+                            pacer_anchor = now
+                            pacer_audio_seconds = 0.0
+                            delay = 0.0
+                        else:
+                            target = pacer_anchor + pacer_audio_seconds
+                            delay = max(0.0, target - now)
+                        if delay > 0:
+                            # 1 s cap as a safety belt; also wakes
+                            # frequently enough that an interrupt
+                            # arriving mid-sleep is honoured by the
+                            # next iteration's seq check.
+                            await asyncio.sleep(min(delay, 1.0))
+                        # CRITICAL: after the (possibly long) sleep,
+                        # re-check the interrupt seq. If barge-in
+                        # arrived while we slept, drop this envelope.
+                        if interrupt_seq != seq_at_dequeue:
+                            envelopes_skipped_due_to_interrupt += 1
+                            # Reset pacer state so the next envelope
+                            # re-anchors on a clean slate.
+                            pacer_anchor = None
+                            pacer_audio_seconds = 0.0
+                            pacer_last_send_at = None
+                            continue
+                        pacer_audio_seconds += envelope_seconds
+                        pacer_last_send_at = loop.time()
+                        await websocket.send_json(envelope)
+                    finally:
+                        outbound_queue.task_done()
+            except WebSocketDisconnect:
+                raise
+            except Exception:
+                logger.exception(
+                    "paced writer error",
+                    extra={
+                        "call_id": session.call_id,
+                        "envelopes_skipped_due_to_interrupt":
+                            envelopes_skipped_due_to_interrupt,
+                    },
+                )
+                raise
 
         read_task = asyncio.create_task(_read_loop_inline(), name=f"read-{session.call_id}")
         write_task = asyncio.create_task(_write_loop_inline(), name=f"write-{session.call_id}")
+        paced_writer_task = asyncio.create_task(
+            _paced_writer_inline(), name=f"paced-writer-{session.call_id}"
+        )
 
         async def _keepalive_loop_inline():
             """Send one silence frame every 20 s to avoid Nova Sonic's
@@ -491,7 +669,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         )
 
         done, pending = await asyncio.wait(
-            {read_task, write_task, keepalive_task},
+            {read_task, write_task, paced_writer_task, keepalive_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
         for t in pending:
@@ -591,10 +769,44 @@ async def _read_loop(
 async def _write_loop(
     websocket: WebSocket, agent: BidiAgent, session: Session
 ) -> None:
-    """Pump agent events into the WebSocket.
+    """DEPRECATED — DEAD CODE. The live write path is `_write_loop_inline`
+    inside `websocket_endpoint`. This module-level function is kept
+    only for the unit-test harness and SHOULD be removed in a follow-up
+    cleanup; do not edit it expecting changes to take effect on a real
+    call. Apply changes to `_write_loop_inline` (search for that name).
+
+    Pump agent events into the WebSocket.
 
     Aggregates `BidiAudioStreamEvent`s into ~OUTPUT_FRAME_BUFFER_MS
     envelopes before sending (see `BidiAudioAggregator` rationale).
+
+    Producer-side 1x realtime pacer
+    -------------------------------
+    Nova Sonic decodes audio faster than realtime — a 30 s response can
+    arrive in a few hundred ms of wall clock. Without pacing, this
+    write loop hands the entire response to the bridge in one burst,
+    overflowing the bridge's outbound RTP queue and causing silent
+    audio drops on the caller side (root cause for May 2026 choppiness
+    reports: `dropped_queue_full=1822` on a 3-min call, ≈25%).
+
+    The pacer enforces no-faster-than-realtime emission per envelope:
+
+      target_send_time = pacer_anchor + cumulative_audio_ms_so_far
+      sleep until max(now, target_send_time)
+
+    Each envelope is `OUTPUT_FRAME_BUFFER_MS` (60 ms by default) of
+    audio, so on a paced send we sleep ≈60 ms between envelopes once
+    we've caught up. The anchor is reset on every utterance boundary
+    (BidiResponseCompleteEvent / BidiInterruptionEvent) so an idle
+    period doesn't compound — the next utterance starts at "now",
+    not at "now + accumulated debt".
+
+    Reference: matches the pacing pattern in the AgentCore WebRTC
+    sample (`OutputTrack.recv()` in
+    awslabs/agentcore-samples/06-bi-directional-streaming-webrtc).
+
+    Toggle: set env var `OUTPUT_PACER_ENABLED=false` to bypass the
+    pacer (emergency rollback). Defaults to enabled in production.
 
     Transcripts + interruptions are logged for observability but NOT
     forwarded to the bridge — the bridge only understands the
@@ -603,6 +815,51 @@ async def _write_loop(
     aggregator = BidiAudioAggregator()
     print(f"[telephony_agent] write loop start call_id={session.call_id}", flush=True)
     event_count = 0
+
+    pacer_enabled = os.getenv("OUTPUT_PACER_ENABLED", "true").lower() != "false"
+    # Loop monotonic anchor (seconds). Set to None whenever no
+    # utterance is in flight; (re)initialised on the first audio
+    # envelope of a new utterance.
+    pacer_anchor: Optional[float] = None
+    pacer_audio_seconds: float = 0.0
+    # Bytes per second of L16 audio at the model's output rate. 16 kHz
+    # mono * 2 bytes = 32_000 B/s. Pre-computed so the per-envelope
+    # path only does a divide.
+    bytes_per_second = MODEL_OUTPUT_SAMPLE_RATE * MODEL_CHANNELS * 2
+
+    async def _send_audio_paced(pcm: bytes) -> None:
+        nonlocal pacer_anchor, pacer_audio_seconds
+        envelope = build_stream_audio_envelope(pcm)
+        if not pacer_enabled:
+            await websocket.send_json(envelope)
+            return
+
+        envelope_seconds = len(pcm) / bytes_per_second
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        if pacer_anchor is None:
+            # First envelope of an utterance — anchor on now and emit
+            # immediately. The next envelope will be paced relative to
+            # this anchor.
+            pacer_anchor = now
+            pacer_audio_seconds = 0.0
+        else:
+            target = pacer_anchor + pacer_audio_seconds
+            delay = target - now
+            if delay > 0:
+                # Cap any single sleep at 1 s as a safety belt — if the
+                # math ever overshoots (clock skew, very long utterance
+                # in steady state), we still keep the loop responsive
+                # enough to react to BidiInterruptionEvent.
+                await asyncio.sleep(min(delay, 1.0))
+        pacer_audio_seconds += envelope_seconds
+        await websocket.send_json(envelope)
+
+    def _reset_pacer() -> None:
+        nonlocal pacer_anchor, pacer_audio_seconds
+        pacer_anchor = None
+        pacer_audio_seconds = 0.0
+
     try:
         async for event in agent.receive():
             event_count += 1
@@ -615,13 +872,16 @@ async def _write_loop(
             if isinstance(event, BidiAudioStreamEvent):
                 pcm = aggregator.feed(event.audio)
                 if pcm is not None:
-                    await websocket.send_json(build_stream_audio_envelope(pcm))
+                    await _send_audio_paced(pcm)
             elif isinstance(event, (BidiResponseCompleteEvent, BidiInterruptionEvent)):
                 # Flush any partial audio buffer so the caller hears the
                 # tail of the last utterance immediately.
                 pcm = aggregator.flush()
                 if pcm is not None:
-                    await websocket.send_json(build_stream_audio_envelope(pcm))
+                    await _send_audio_paced(pcm)
+                # Utterance boundary — reset the pacer so the next
+                # utterance starts at "now", not at "now + idle debt".
+                _reset_pacer()
                 if isinstance(event, BidiInterruptionEvent):
                     # Tell the Node bridge to wipe its outbound queue so
                     # stale audio stops immediately.
