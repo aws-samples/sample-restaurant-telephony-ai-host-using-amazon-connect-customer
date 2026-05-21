@@ -194,6 +194,12 @@ export class IngressStack extends cdk.Stack {
       environment: {
         DEPLOYMENT_PREFIX: prefix,
         LOG_LEVEL: 'INFO',
+        // Diagnostic flag: when 'true', the SMA handler logs the full
+        // raw Chime event payload on every invocation. Used to inspect
+        // SIP headers and parameters Chime forwards (e.g. for store /
+        // location routing). Disable in production by setting to
+        // 'false' once the routing investigation is complete.
+        LOG_RAW_EVENT: 'true',
         // VOICE_CONNECTOR_ARN_PARAM gets added below, once the SSM
         // parameter exists.
       },

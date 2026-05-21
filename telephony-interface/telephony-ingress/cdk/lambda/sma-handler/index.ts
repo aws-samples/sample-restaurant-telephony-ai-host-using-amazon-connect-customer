@@ -243,6 +243,34 @@ export const handler = async (event: ChimeEvent): Promise<ChimeResponse> => {
   const eventType = event.InvocationEventType ?? '';
   const actionType = event.ActionData?.Type ?? '';
 
+  // ───── Diagnostic: log the entire event payload verbatim ─────
+  //
+  // We need to inspect the SIP headers and parameters Chime forwards
+  // on each INVITE to identify any field that carries a store /
+  // location / customer routing identifier (e.g. a Diversion header,
+  // Referred-By, custom X-headers, or a SIP URI parameter on the
+  // `To` line). The full event is the only reliable way to see what
+  // Chime exposes — `aws chime-sdk-voice` docs are not exhaustive on
+  // this surface and the shape can change between Chime releases.
+  //
+  // PII posture: this is a deliberately verbose log gated by an env
+  // flag. Production deploys should leave LOG_RAW_EVENT=false. The
+  // raw event includes the full caller `From` E.164, so do NOT enable
+  // this in shared / production environments without explicit
+  // approval.
+  if (process.env.LOG_RAW_EVENT === 'true') {
+    console.log(
+      JSON.stringify({
+        level: 'INFO',
+        message: 'sma_event_raw',
+        invocationEventType: eventType,
+        actionType,
+        deploymentPrefix: DEPLOYMENT_PREFIX,
+        rawEvent: event,
+      }),
+    );
+  }
+
   if (eventType === 'NEW_INBOUND_CALL') {
     return handleNewInboundCall(event);
   }
