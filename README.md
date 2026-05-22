@@ -31,49 +31,7 @@ The Guidance uses **Amazon Chime SDK Voice Connector** for SIP trunking and Publ
 
 The architecture implements a four-section decoupled pattern:
 
-```mermaid
-graph TB
-    subgraph SectionA["Section A — Backend Infrastructure"]
-        DDB[("Amazon DynamoDB<br/>5 tables")]
-        LOC["Amazon Location Service<br/>geocoding + routes"]
-        LAMBDAS["AWS Lambda<br/>10 ordering handlers"]
-        APIGW["Amazon API Gateway<br/>REST + AWS_IAM"]
-    end
-
-    subgraph SectionB["Section B — AgentCore Gateway"]
-        GW["Amazon Bedrock AgentCore Gateway<br/>MCP + AWS_IAM"]
-    end
-
-    subgraph SectionC["Section C — AgentCore Runtime"]
-        ECR["Amazon ECR<br/>ARM64 image"]
-        CB["AWS CodeBuild<br/>image build"]
-        RT["Amazon Bedrock AgentCore Runtime<br/>Strands BidiAgent + Nova 2 Sonic"]
-    end
-
-    subgraph SectionD["Section D — Telephony Ingress"]
-        VC["Amazon Chime SDK Voice Connector<br/>SIP trunk + toll-free number"]
-        SMA["AWS Lambda<br/>SMA handler"]
-        NLB["Network Load Balancer<br/>TCP 5060"]
-        FG["Amazon ECS on AWS Fargate<br/>drachtio + Node RTP bridge<br/>2 tasks across 2 AZs"]
-    end
-
-    Caller(["Phone caller"])
-    Caller -->|PSTN dial| VC
-    VC -->|NEW_INBOUND_CALL| SMA
-    SMA -.->|warmup POST<br/>X-Session-Id deterministic| RT
-    SMA -->|CallAndBridge<br/>SipHeaders X-Session-Id| VC
-    VC -->|SIP INVITE TCP/5060| NLB
-    NLB --> FG
-    VC -.->|RTP UDP direct to task public IP| FG
-    FG -->|SigV4 WebSocket<br/>session-id stickiness| RT
-    RT -->|MCP tool calls| GW
-    GW --> APIGW
-    APIGW --> LAMBDAS
-    LAMBDAS --> DDB
-    LAMBDAS --> LOC
-    CB --> ECR
-    ECR --> RT
-```
+![Telephony Voice Ordering on AWS — architecture diagram](assets/architecture.jpg)
 
 **Section A — Backend Infrastructure.** Four AWS CDK stacks deploy the restaurant backend: **Amazon DynamoDB** tables for customer profiles, orders, menu items, carts, and locations; **Amazon Location Service** for geocoding and route calculation; **AWS Lambda** functions for business logic; and **Amazon API Gateway** REST endpoints with **AWS Identity and Access Management (IAM)** authorization.
 
