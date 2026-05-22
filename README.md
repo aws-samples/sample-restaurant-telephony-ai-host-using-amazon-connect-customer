@@ -31,7 +31,7 @@ The Guidance uses **Amazon Chime SDK Voice Connector** for SIP trunking and Publ
 
 The architecture implements a four-section decoupled pattern:
 
-![Telephony Voice Ordering on AWS — architecture diagram](assets/architecture.jpg)
+![Telephony Voice Ordering on AWS — architecture diagram](assets/architecture.png)
 
 **Section A — Backend Infrastructure.** Four AWS CDK stacks deploy the restaurant backend: **Amazon DynamoDB** tables for customer profiles, orders, menu items, carts, and locations; **Amazon Location Service** for geocoding and route calculation; **AWS Lambda** functions for business logic; and **Amazon API Gateway** REST endpoints with **AWS Identity and Access Management (IAM)** authorization.
 
