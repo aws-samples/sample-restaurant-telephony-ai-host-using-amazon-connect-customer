@@ -134,9 +134,19 @@ Options:
                               Replaces reference-project's --user-email
                               since the telephony agent keys customers
                               by phone (hashed via the customer-id pepper).
-  --company-name "<brand>"    Optional rebrand for the synthetic
-                              locations (e.g. "Example Cafe"). Threaded
-                              into populate-data.js verbatim.
+  --company-name "<brand>"    Brand identity for the deployment.
+                              (1) Rebrands every synthetic-data location's
+                              display name to this value.
+                              (2) Substitutes {BUSINESS_NAME} in the
+                              Telephony agent's system prompt at CDK synth
+                              time so the agent greets callers as this
+                              brand. Optional; defaults to "Amazing Burgers"
+                              when omitted. Use this flag when the brand
+                              you want to demo doesn't have enough real
+                              locations in your test region — pair with
+                              --synth-business-name set to a broader
+                              search term (e.g. demo as "Amazing Burgers"
+                              while seeding from "Burger Restaurants").
   --with-synthetic-data       Run the tel-synthetic-data layer non-
                               interactively. Requires --user-name +
                               --user-phone and either --synth-location
@@ -147,10 +157,16 @@ Options:
   --synth-location "<where>"  City / zip / address / "lat,lon" passed
                               through to populate-data.js. Required in
                               --with-synthetic-data unattended mode.
-  --synth-business-name "<q>" Business-type search term passed through
-                              to populate-data.js (e.g. "burgers").
-                              Required in --with-synthetic-data
-                              unattended mode.
+  --synth-business-name "<query>"
+                              Business search term passed verbatim to
+                              Amazon Location Service Geo Places (e.g.
+                              "burgers", "pizza", "tacos", "Burger
+                              Restaurants"). Determines what real-
+                              world locations get pulled into the synthetic
+                              Locations table. Does NOT affect the agent's
+                              system prompt — pass --company-name for that.
+                              Required in --with-synthetic-data unattended
+                              mode.
   --help                      Show this help.
 
 Prerequisites:
@@ -837,13 +853,23 @@ if should_deploy tel-agent-runtime; then
   (
     cd "$WORKSPACE_ROOT/backend/agentcore-runtime-telephony/cdk/runtime"
     safe_npm_install
-    # Forward --synth-business-name (when set) as a CDK context value so
+    # Forward --company-name (when set) as a CDK context value so
     # lib/runtime-stack.ts can substitute {BUSINESS_NAME} in the prompt
     # templates at synth time. When omitted the prompt-texts default
-    # ("the restaurant") keeps the greeting grammatical.
+    # ("Amazing Burgers") keeps the greeting grammatical.
+    #
+    # Note the deliberate split between the two flags:
+    #   --company-name        is the brand the agent presents to callers
+    #                         (drives the prompt's {BUSINESS_NAME}).
+    #   --synth-business-name is only the Geo Places search term used to
+    #                         seed the synthetic-data locations.
+    # Operators demoing for a brand whose real locations are scarce in the
+    # target region can broaden --synth-business-name (e.g. "Burger
+    # Restaurants") and rebrand the seeded rows via --company-name (e.g.
+    # "Amazing Burgers"). See the Automated Deployment section in README.md.
     BUSINESS_NAME_CONTEXT_FLAG=()
-    if [ -n "$SYNTH_BUSINESS_NAME" ]; then
-      BUSINESS_NAME_CONTEXT_FLAG=(--context "businessName=${SYNTH_BUSINESS_NAME}")
+    if [ -n "$COMPANY_NAME" ]; then
+      BUSINESS_NAME_CONTEXT_FLAG=(--context "businessName=${COMPANY_NAME}")
     fi
     # shellcheck disable=SC2086
     npx cdk deploy AgentRuntimeStack \

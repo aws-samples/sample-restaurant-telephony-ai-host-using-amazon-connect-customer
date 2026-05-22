@@ -198,13 +198,19 @@ export class AgentRuntimeStack extends cdk.Stack {
     // namespace.
     //
     // {BUSINESS_NAME} substitution at synth time: deploy-all.sh forwards
-    // the operator-supplied --synth-business-name flag as a CDK context
-    // value (`businessName`). We replace the placeholder before passing
-    // the text to ssm.CfnParameter so the rendered text lands verbatim
-    // in SSM Parameter Store. Default `Amazing Burgers` is the
-    // documented fictitious-brand placeholder used across this sample;
-    // operators deploying for a real brand should pass the
-    // --synth-business-name flag.
+    // the operator-supplied --company-name flag as a CDK context value
+    // (`businessName`). We replace the placeholder before passing the
+    // text to ssm.CfnParameter so the rendered text lands verbatim in
+    // SSM Parameter Store. Default `Amazing Burgers` is the documented
+    // fictitious-brand placeholder used across this sample; operators
+    // deploying for a real brand should pass --company-name "<Brand>".
+    //
+    // Note --company-name is distinct from --synth-business-name:
+    //   --company-name        the brand the agent presents to callers
+    //                         (this CDK context key).
+    //   --synth-business-name the Geo Places search term used to seed
+    //                         the synthetic-data locations only; does
+    //                         NOT touch the prompt.
     const businessName: string =
       this.node.tryGetContext('businessName') || 'Amazing Burgers';
     const renderBusinessName = (template: string): string =>
