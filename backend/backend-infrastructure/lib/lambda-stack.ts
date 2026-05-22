@@ -215,13 +215,20 @@ export class LambdaStack extends cdk.Stack {
       logGroup: makeLogGroup('GetPreviousOrdersLogGroup', 'GetPreviousOrders'),
       environment: {
         ORDERS_TABLE_NAME: ordersTableNameParam.valueAsString,
+        // Locations table is read with BatchGetItem to enrich each
+        // order row with the human-readable address (street, city,
+        // state). Without this the agent receives only locationId +
+        // locationName and has no way to confirm the location to a
+        // caller without speaking an opaque internal id.
+        LOCATIONS_TABLE_NAME: locationsTableNameParam.valueAsString,
       },
       timeout: cdk.Duration.seconds(30),
       memorySize: 256,
       description:
-        'Retrieve customer order history (last 5 orders).',
+        'Retrieve customer order history (last 5 orders), enriched with location address fields from the Locations table.',
     });
     ordersTable.grantReadData(getPreviousOrders);
+    locationsTable.grantReadData(getPreviousOrders);
 
     const getMenuRole = makeRole('GetMenuRole', 'GetMenu');
     const getMenu = new lambda.Function(this, 'GetMenu', {
