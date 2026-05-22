@@ -226,9 +226,10 @@ export class AgentRuntimeStack extends cdk.Stack {
       type: 'String',
       value: renderBusinessName(ANONYMOUS_PROMPT_TEXT),
       description: 'Telephony anonymous-caller system prompt template. Edit lib/prompt-texts.ts + redeploy AgentRuntimeStack to overwrite.',
-      // Stays on Standard tier (4 KB cap) - anonymous prompt is shorter
-      // and fits comfortably; no per-parameter cost.
-      tier: 'Standard',
+      // Advanced tier required: the no-internal-ids guidance and the
+      // workflow checklist together exceed the 4 KB Standard cap.
+      // Cost impact: $0.05 per parameter per month.
+      tier: 'Advanced',
     });
 
     // Serialize the two PutParameter calls so CloudFormation does not hit
