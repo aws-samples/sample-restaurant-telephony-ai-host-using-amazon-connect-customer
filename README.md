@@ -120,7 +120,7 @@ The following table provides a sample cost breakdown for deploying this Guidance
 | [Amazon Location Service](https://aws.amazon.com/location/pricing/) | ~1,000 geocoding calls plus ~500 route calculations | $0.50 |
 | [Amazon ECR](https://aws.amazon.com/ecr/pricing/) | ~1 GB image storage above the free tier | $0.10 |
 | [Amazon S3 (CodeBuild source)](https://aws.amazon.com/s3/pricing/) | <100 MB source asset storage | $0.05 |
-| [AWS Systems Manager Parameter Store (advanced)](https://aws.amazon.com/systems-manager/pricing/) | 1 advanced SecureString parameter, 730 hours | $0.05 |
+| [AWS Systems Manager Parameter Store (advanced)](https://aws.amazon.com/systems-manager/pricing/) | 2 advanced parameters (customer-id pepper SecureString + loyalty prompt over 4 KB), 730 hours | $0.10 |
 | | **Estimated Total** | **~$237** |
 
 **Notes:**

@@ -196,19 +196,38 @@ export class AgentRuntimeStack extends cdk.Stack {
     // Parameter names use the `/${prefix}/prompts/telephony-<kind>` path
     // so they live alongside the pepper under the project's SSM
     // namespace.
+    //
+    // {BUSINESS_NAME} substitution at synth time: deploy-all.sh forwards
+    // the operator-supplied --synth-business-name flag as a CDK context
+    // value (`businessName`). We replace the placeholder before passing
+    // the text to ssm.CfnParameter so the rendered text lands verbatim
+    // in SSM Parameter Store. Default `the restaurant` keeps a stack
+    // deployed without the flag still grammatical (greeting reads
+    // "welcome to the restaurant").
+    const businessName: string =
+      this.node.tryGetContext('businessName') || 'the restaurant';
+    const renderBusinessName = (template: string): string =>
+      template.replaceAll('{BUSINESS_NAME}', businessName);
+
     const loyaltyPromptParam = new ssm.CfnParameter(this, 'LoyaltyPromptParam', {
       name: cdk.Fn.sub('/${P}/prompts/telephony-loyalty', { P: prefix }),
       type: 'String',
-      value: LOYALTY_PROMPT_TEXT,
+      value: renderBusinessName(LOYALTY_PROMPT_TEXT),
       description: 'Telephony loyalty-customer system prompt template. Edit lib/prompt-texts.ts + redeploy AgentRuntimeStack to overwrite.',
-      tier: 'Standard',
+      // Advanced tier required: the loyalty template exceeds the 4 KB
+      // Standard-tier value cap once {BUSINESS_NAME} is substituted and
+      // the workflow + filler-phrase guidance is included. Cost impact:
+      // $0.05 per parameter per month (see README sample cost table).
+      tier: 'Advanced',
     });
 
     const anonymousPromptParam = new ssm.CfnParameter(this, 'AnonymousPromptParam', {
       name: cdk.Fn.sub('/${P}/prompts/telephony-anonymous', { P: prefix }),
       type: 'String',
-      value: ANONYMOUS_PROMPT_TEXT,
+      value: renderBusinessName(ANONYMOUS_PROMPT_TEXT),
       description: 'Telephony anonymous-caller system prompt template. Edit lib/prompt-texts.ts + redeploy AgentRuntimeStack to overwrite.',
+      // Stays on Standard tier (4 KB cap) - anonymous prompt is shorter
+      // and fits comfortably; no per-parameter cost.
       tier: 'Standard',
     });
 

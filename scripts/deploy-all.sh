@@ -801,10 +801,19 @@ if should_deploy tel-agent-runtime; then
   (
     cd "$WORKSPACE_ROOT/backend/agentcore-runtime-telephony/cdk/runtime"
     safe_npm_install
+    # Forward --synth-business-name (when set) as a CDK context value so
+    # lib/runtime-stack.ts can substitute {BUSINESS_NAME} in the prompt
+    # templates at synth time. When omitted the prompt-texts default
+    # ("the restaurant") keeps the greeting grammatical.
+    BUSINESS_NAME_CONTEXT_FLAG=()
+    if [ -n "$SYNTH_BUSINESS_NAME" ]; then
+      BUSINESS_NAME_CONTEXT_FLAG=(--context "businessName=${SYNTH_BUSINESS_NAME}")
+    fi
     # shellcheck disable=SC2086
     npx cdk deploy AgentRuntimeStack \
       --require-approval never \
       $CDK_ROLLBACK_FLAG \
+      "${BUSINESS_NAME_CONTEXT_FLAG[@]}" \
       --parameters "AgentRuntimeStack:DeploymentPrefix=${PROJECT_PREFIX}" \
       --parameters "AgentRuntimeStack:AgentEcrRepoUri=${ECR_URI}" \
       --parameters "AgentRuntimeStack:AgentCoreGatewayUrl=${GATEWAY_URL}" \
