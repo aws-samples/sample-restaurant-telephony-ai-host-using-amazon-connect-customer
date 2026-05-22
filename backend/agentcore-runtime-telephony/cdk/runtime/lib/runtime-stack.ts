@@ -201,11 +201,12 @@ export class AgentRuntimeStack extends cdk.Stack {
     // the operator-supplied --synth-business-name flag as a CDK context
     // value (`businessName`). We replace the placeholder before passing
     // the text to ssm.CfnParameter so the rendered text lands verbatim
-    // in SSM Parameter Store. Default `the restaurant` keeps a stack
-    // deployed without the flag still grammatical (greeting reads
-    // "welcome to the restaurant").
+    // in SSM Parameter Store. Default `Amazing Burgers` is the
+    // documented fictitious-brand placeholder used across this sample;
+    // operators deploying for a real brand should pass the
+    // --synth-business-name flag.
     const businessName: string =
-      this.node.tryGetContext('businessName') || 'the restaurant';
+      this.node.tryGetContext('businessName') || 'Amazing Burgers';
     const renderBusinessName = (template: string): string =>
       template.replaceAll('{BUSINESS_NAME}', businessName);
 

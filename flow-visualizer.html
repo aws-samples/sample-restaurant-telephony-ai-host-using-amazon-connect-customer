@@ -72,7 +72,51 @@
   }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
 
-  .ctrls { display: flex; gap: 8px; align-items: center; }
+  .ctrls { display: flex; gap: 10px; align-items: center; }
+  /* Speed slider lives left of the Auto-play button. The slider's
+     value drives the autoplay step interval inversely — higher value
+     on the slider = faster autoplay. The label sits above the slider
+     in compact mode so it doesn't crowd the buttons. */
+  .speed-control {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 10px;
+    background: var(--glass);
+    border: 1px solid var(--glass-brd);
+    border-radius: 8px;
+  }
+  .speed-control label {
+    font: 10px var(--mono); color: var(--txt-dim);
+    letter-spacing: .06em; text-transform: uppercase;
+    user-select: none;
+  }
+  .speed-control input[type="range"] {
+    -webkit-appearance: none; appearance: none;
+    width: 100px; height: 4px;
+    background: rgba(120,180,255,.2);
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+  }
+  .speed-control input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 12px; height: 12px;
+    background: var(--edge-active);
+    border-radius: 50%;
+    cursor: pointer;
+    box-shadow: 0 0 8px rgba(90,164,255,.55);
+  }
+  .speed-control input[type="range"]::-moz-range-thumb {
+    width: 12px; height: 12px;
+    background: var(--edge-active);
+    border-radius: 50%;
+    cursor: pointer;
+    border: none;
+    box-shadow: 0 0 8px rgba(90,164,255,.55);
+  }
+  .speed-control .speed-value {
+    font: 10px var(--mono); color: var(--txt);
+    min-width: 32px; text-align: right;
+  }
   button {
     background: var(--glass); color: var(--txt);
     border: 1px solid var(--glass-brd); border-radius: 8px;
@@ -323,6 +367,11 @@
 <header>
   <h1>Telephony Voice Agent &mdash; How a Call Works</h1>
   <div class="ctrls">
+    <div class="speed-control" title="Auto-play speed">
+      <label for="speedSlider">Speed</label>
+      <input type="range" id="speedSlider" min="1" max="10" value="3" step="1" />
+      <span class="speed-value" id="speedValue">1.0×</span>
+    </div>
     <button id="autoPlay">Auto-play</button>
     <button id="restart">Restart</button>
   </div>
@@ -427,6 +476,12 @@ const EDGES = [
   { id: 'rtpbridge-chime', from: 'rtpBridge', to: 'chimeVC',   curve: 120, color: 'var(--audio-out)' },
   // Inside the task
   { id: 'drachtio-bridge', from: 'drachtio',  to: 'rtpBridge', curve:   0, color: 'var(--ctrl)' },
+  // Pre-warm POST from SMA Lambda (r7.2) — SigV4-signed POST /invocations
+  // that arrives BEFORE the bridged INVITE and warms the microVM.
+  // Strong negative curve so the arc rises ABOVE the NLB + drachtio
+  // cluster on its way to AgentCore Runtime instead of cutting
+  // diagonally through their boxes.
+  { id: 'sma-runtime',     from: 'sma',       to: 'runtime',   curve: -290, color: 'var(--prompt)' },
   // AgentCore
   { id: 'bridge-runtime', from: 'rtpBridge', to: 'runtime',   curve: -20, color: 'var(--audio-in)' },
   { id: 'runtime-bridge', from: 'runtime',   to: 'rtpBridge', curve:  40, color: 'var(--audio-out)' },
@@ -473,17 +528,35 @@ const STEPS = [
     packets: [{ edge: 'chime-sma', kind: 'ctrl', count: 1 }],
   },
   {
-    title: 'Lambda tells Chime: "bridge to our SIP gateway"',
-    body: 'The Lambda returns a <code>CallAndBridge</code> action that instructs Chime to forward the call to the SIP gateway. It hands Chime a SIP address (our NLB\'s public DNS).',
-    meta: { Action: 'CallAndBridge', Target: 'sip-gateway-nlb-xxxxxxxxxxxxxxxx.elb.amazonaws.com:5060' },
+    title: 'Lambda pre-warms the agent — beats cold start',
+    body: 'BEFORE responding to Chime, the Lambda <span class="hl">awaits</span> a SigV4-signed <span class="hl">POST /invocations</span> warmup request to <span class="hl">Amazon Bedrock AgentCore Runtime</span>. The deterministic session id pins the request to a specific microVM (microVM stickiness), and the agent runs the expensive setup work — <span class="hl">prompt rendering, customer lookup, Nova Sonic stream open, MCP tool discovery, agent priming</span> — INSIDE this 1-2 second window. The phone is still ringing, the caller is still engaged. By the time the bridged INVITE arrives at the SIP gateway, the agent is ready to speak.',
+    meta: { Method: 'POST /invocations', Header: 'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: pstn-<hex>', Body: '{"type":"warmup","raw_from":...,"voice_id":"tiffany"}', Effect: 'agent stashes warm context in microVM-local cache keyed by session_id' },
+    nodes: ['sma', 'runtime', 'renderer', 'customers', 'novaSonic'],
+    edges: [
+      { edge: 'sma-runtime', kind: 'prompt' },
+      { edge: 'runtime-renderer', kind: 'prompt' },
+      { edge: 'renderer-customers', kind: 'db' },
+      { edge: 'runtime-nova', kind: 'ctrl' },
+    ],
+    packets: [
+      { edge: 'sma-runtime', kind: 'prompt', count: 1, delay: 0 },
+      { edge: 'runtime-renderer', kind: 'prompt', count: 1, delay: 350 },
+      { edge: 'renderer-customers', kind: 'db', count: 1, delay: 600 },
+      { edge: 'runtime-nova', kind: 'ctrl', count: 1, delay: 900 },
+    ],
+  },
+  {
+    title: 'Warmup done — Lambda tells Chime to bridge the call',
+    body: 'With the agent warmed and waiting, the Lambda finally returns a <code>CallAndBridge</code> action to Chime, instructing it to forward the call to the SIP gateway. The action carries a <span class="hl">custom SIP header</span> <code>X-Session-Id</code> with the same deterministic identifier — Chime relays the header verbatim onto the bridged INVITE so the SIP gateway knows which warmed microVM to attach to.',
+    meta: { Action: 'CallAndBridge', Target: 'sip-gateway-nlb-xxxxxxxxxxxxxxxx.elb.amazonaws.com:5060', SipHeader: 'X-Session-Id: pstn-<hex>' },
     nodes: ['chimeVC', 'sma'],
     edges: [{ edge: 'sma-chime', kind: 'ctrl' }],
     packets: [{ edge: 'sma-chime', kind: 'ctrl', count: 1 }],
   },
   {
     title: 'Chime sends a SIP INVITE',
-    body: 'Chime sends a <span class="hl">SIP INVITE</span> — the SIP message that initiates a voice call. It goes over TCP port 5060 to our <span class="hl">Public Network Load Balancer</span>, which forwards it to one of our Fargate tasks.',
-    meta: { Protocol: 'SIP/TCP:5060', From: '+12125550100', To: '+18005550100' },
+    body: 'Chime sends a <span class="hl">SIP INVITE</span> — the SIP message that initiates a voice call. It goes over TCP port 5060 to our <span class="hl">Public Network Load Balancer</span>, which forwards it to one of our Fargate tasks. The INVITE carries the <code>X-Session-Id</code> custom header that the SMA Lambda set on the CallAndBridge.',
+    meta: { Protocol: 'SIP/TCP:5060', From: '+12125550100', To: '+18005550100', 'X-Session-Id': 'pstn-<hex> (from SMA)' },
     nodes: ['chimeVC', 'nlb', 'drachtio'],
     edges: [
       { edge: 'chime-nlb', kind: 'sip' },
@@ -526,9 +599,9 @@ const STEPS = [
     packets: [{ edge: 'chime-rtpbridge', kind: 'audioIn', count: 8, delay: 0, spread: 1800 }],
   },
   {
-    title: 'Node bridge opens a signed WebSocket to AgentCore Runtime',
-    body: 'While audio is flowing, our Node app signs a URL with <span class="hl">AWS SigV4</span> and opens a WebSocket to <span class="hl">Amazon Bedrock AgentCore Runtime</span>. That Runtime is the container that hosts our Python <span class="hl">Strands BidiAgent</span>. The WebSocket is the only channel between the two — it carries caller audio up and agent audio down.',
-    meta: { Auth: 'AWS SigV4 query-string', URL: 'wss://<runtime-id>.bedrock-agentcore.us-east-1.amazonaws.com/ws', Upgrade: 'HTTPS → WSS' },
+    title: 'Bridge opens a WebSocket pinned to the same session id',
+    body: 'The Node bridge reads the <code>X-Session-Id</code> SIP header from the bridged INVITE, signs a URL with <span class="hl">AWS SigV4</span>, and opens a WebSocket to <span class="hl">Amazon Bedrock AgentCore Runtime</span>. The session id rides on TWO query params: the <span class="hl">official routing param</span> tells AgentCore\'s edge to route the WebSocket to the warmed microVM (microVM stickiness), and the <span class="hl">custom-prefix param</span> is forwarded into the container as an HTTP header so the agent code can read it. The WebSocket lands on the warm cache and the agent attaches to the pre-built call context in milliseconds — <b>no auth message, no cold start</b>.',
+    meta: { Auth: 'AWS SigV4 query-string', URL: 'wss://<runtime-id>.bedrock-agentcore.us-east-1.amazonaws.com/ws', 'Routing param': 'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id (consumed by edge)', 'Custom-prefix param': 'X-Amzn-Bedrock-AgentCore-Runtime-Custom-Session-Id (forwarded as header)' },
     nodes: ['rtpBridge', 'runtime'],
     edges: [
       { edge: 'bridge-runtime', kind: 'ctrl' },
@@ -538,23 +611,9 @@ const STEPS = [
     ],
   },
   {
-    title: 'AgentCore looks up the caller',
-    body: 'Our <span class="hl">Prompt Renderer</span> Lambda takes the caller\'s phone number, hashes it with a secret pepper, and looks up the customer in <span class="hl">DynamoDB</span>. If found, it pulls their name and loyalty status. It also fetches the right system prompt from <span class="hl">SSM Parameter Store</span> (not shown on this diagram for clarity).',
-    meta: { Lambda: 'prompt-renderer', Hash: 'pstn-0000000000000000', LookupTime: '~100ms' },
-    nodes: ['runtime', 'renderer', 'customers'],
-    edges: [
-      { edge: 'runtime-renderer', kind: 'prompt' },
-      { edge: 'renderer-customers', kind: 'db' },
-    ],
-    packets: [
-      { edge: 'runtime-renderer', kind: 'prompt', count: 1, delay: 0 },
-      { edge: 'renderer-customers', kind: 'db', count: 1, delay: 300 },
-    ],
-  },
-  {
-    title: 'AgentCore Runtime starts a Nova Sonic 2 bidi stream',
-    body: 'Inside the Runtime, our Strands BidiAgent opens a <span class="hl">bidirectional streaming session</span> with <span class="hl">Nova Sonic 2</span>, Amazon\'s voice-to-voice AI. Both directions flow simultaneously — the model can listen and speak at the same time, like a real phone conversation.',
-    meta: { Model: 'amazon.nova-sonic-v2', Voice: 'tiffany', Protocol: 'InvokeModelWithBidirectionalStream' },
+    title: 'Agent attaches to the pre-warmed context',
+    body: 'Because the warmup POST already ran the prompt resolution, customer lookup, MCP tool discovery, and Nova Sonic stream open, the <span class="hl">/ws</span> handler does a single <code>_warm_sessions.pop(session_id)</code> and starts streaming audio immediately. The pre-built BidiAgent and the open Nova Sonic 2 bidi stream are both already alive — the agent just hooks the WebSocket in and starts paced reads + writes.',
+    meta: { 'Cache lookup': 'O(ms)', Model: 'amazon.nova-sonic-v2', Voice: 'tiffany', 'Connected since': 'warmup tick (~1-2s ago)' },
     nodes: ['runtime', 'novaSonic'],
     edges: [
       { edge: 'runtime-nova', kind: 'ctrl' },
@@ -566,8 +625,26 @@ const STEPS = [
     ],
   },
   {
+    title: 'Nova Sonic greets the caller first',
+    body: 'Because the warmup primed Nova Sonic with a "Hi" message, the model treats the call as already in progress and produces the greeting from the system prompt — for a known caller, something like <i>"Hello Jane, welcome back to Amazing Burgers. Hold on just a second while I pull up your previous orders so I can serve you better."</i> The audio flows DOWN the stack: <span class="hl">Nova Sonic → AgentCore Runtime → WebSocket → Node bridge → direct RTP to Chime → caller\'s phone</span>. The caller hears a friendly voice within milliseconds of answering.',
+    meta: { Trigger: 'agent.send("Hi") during warmup', 'First utterance source': 'system prompt {BUSINESS_NAME} + {CUSTOMER_NAME}', Direction: 'DOWN', Latency: '0 cold-start, ~120ms model-to-ear' },
+    nodes: ['novaSonic', 'runtime', 'rtpBridge', 'chimeVC', 'caller'],
+    edges: [
+      { edge: 'nova-runtime', kind: 'audioOut' },
+      { edge: 'runtime-bridge', kind: 'audioOut' },
+      { edge: 'rtpbridge-chime', kind: 'audioOut' },
+      { edge: 'chime-caller', kind: 'audioOut' },
+    ],
+    packets: [
+      { edge: 'nova-runtime', kind: 'audioOut', count: 3, delay: 0, spread: 1500 },
+      { edge: 'runtime-bridge', kind: 'audioOut', count: 3, delay: 150, spread: 1500 },
+      { edge: 'rtpbridge-chime', kind: 'audioOut', count: 3, delay: 300, spread: 1500 },
+      { edge: 'chime-caller', kind: 'audioOut', count: 3, delay: 450, spread: 1500 },
+    ],
+  },
+  {
     title: 'Caller speaks — audio flows UP the stack',
-    body: 'The customer talks. Their voice travels the full up-path: <span class="hl">phone → Chime → direct RTP to container → Node bridge → WebSocket → AgentCore Runtime → Nova Sonic</span>. Each hop takes milliseconds. Nova Sonic "hears" the caller in near-real-time.',
+    body: 'The customer responds to the greeting. Their voice travels the full up-path: <span class="hl">phone → Chime → direct RTP to container → Node bridge → WebSocket → AgentCore Runtime → Nova Sonic</span>. Each hop takes milliseconds. Nova Sonic "hears" the caller in near-real-time.',
     meta: { Latency: '~120ms end-to-end', 'Sample rate': '8 kHz μ-law → 16 kHz L16', Direction: 'UP' },
     nodes: ['caller', 'chimeVC', 'rtpBridge', 'runtime', 'novaSonic'],
     edges: [
@@ -614,9 +691,9 @@ const STEPS = [
     ],
   },
   {
-    title: 'Nova Sonic speaks — audio flows DOWN',
-    body: 'Nova Sonic generates a natural voice response and streams it back through the same path in reverse: <span class="hl">Nova Sonic → AgentCore Runtime → WebSocket → Node bridge → direct RTP to Chime → caller\'s phone</span>. The customer hears a friendly human-like voice.',
-    meta: { Output: 'Amazon Nova Sonic 2 · tiffany voice', 'Sample rate': '16 kHz L16 → 8 kHz μ-law', Direction: 'DOWN' },
+    title: 'Nova Sonic speaks the tool result back',
+    body: 'With the menu data in hand, Nova Sonic generates a natural voice response and streams it back through the same path as the greeting: <span class="hl">Nova Sonic → AgentCore Runtime → WebSocket → Node bridge → direct RTP to Chime → caller\'s phone</span>. The customer hears the menu, picks an item, and the conversation continues — every subsequent turn loops through steps 13-16.',
+    meta: { Output: 'Amazon Nova Sonic 2 · tiffany voice', 'Sample rate': '16 kHz L16 → 8 kHz μ-law', Direction: 'DOWN', 'Conversation loop': 'steps 13-16 repeat per turn' },
     nodes: ['novaSonic', 'runtime', 'rtpBridge', 'chimeVC', 'caller'],
     edges: [
       { edge: 'nova-runtime', kind: 'audioOut' },
@@ -866,7 +943,18 @@ function firePacket(edgeId, kindColor, durationMs) {
 let currentStep = -1;
 let autoPlayTimer = null;
 let autoPlaying = false;
-const AUTOPLAY_MS = 3500;
+// Auto-play speed is driven by the slider. The slider value (1-10)
+// maps to a "speed multiplier" displayed to the user as 0.33×-3.33×.
+// The actual interval is BASE / multiplier. At slider=3 (default) the
+// multiplier is 1.0× → interval is BASE_AUTOPLAY_MS = 3500 ms.
+const BASE_AUTOPLAY_MS = 3500;
+function currentSpeedMultiplier() {
+  const slider = document.getElementById('speedSlider');
+  return slider ? Number(slider.value) / 3 : 1;
+}
+function currentAutoplayMs() {
+  return Math.max(400, Math.round(BASE_AUTOPLAY_MS / currentSpeedMultiplier()));
+}
 
 function applyStep(idx) {
   currentStep = idx;
@@ -945,7 +1033,7 @@ function startAutoPlay() {
   autoPlaying = true;
   document.getElementById('autoPlay').innerHTML = 'Pause';
   // Advance immediately on click so the user sees action right away,
-  // then continue stepping forward every AUTOPLAY_MS.
+  // then continue stepping forward at the slider-driven interval.
   if (currentStep < STEPS.length - 1) {
     applyStep(currentStep + 1);
   }
@@ -955,12 +1043,26 @@ function startAutoPlay() {
       return;
     }
     applyStep(currentStep + 1);
-  }, AUTOPLAY_MS);
+  }, currentAutoplayMs());
 }
 function stopAutoPlay() {
   autoPlaying = false;
   document.getElementById('autoPlay').innerHTML = 'Auto-play';
   if (autoPlayTimer) { clearInterval(autoPlayTimer); autoPlayTimer = null; }
+}
+// When the user drags the slider while auto-play is running, swap the
+// interval in-place so the change takes effect immediately rather
+// than waiting for the next applyStep tick.
+function reapplyAutoplayInterval() {
+  if (!autoPlaying || !autoPlayTimer) return;
+  clearInterval(autoPlayTimer);
+  autoPlayTimer = setInterval(() => {
+    if (currentStep >= STEPS.length - 1) {
+      stopAutoPlay();
+      return;
+    }
+    applyStep(currentStep + 1);
+  }, currentAutoplayMs());
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -985,6 +1087,22 @@ document.getElementById('autoPlay').addEventListener('click', () => {
     startAutoPlay();
   }
 });
+
+// Speed-slider wiring. Update the visible multiplier on every change,
+// and if auto-play is running rebuild the interval immediately so the
+// new speed takes effect without waiting for the next tick.
+(function initSpeedSlider() {
+  const slider = document.getElementById('speedSlider');
+  const valueEl = document.getElementById('speedValue');
+  if (!slider || !valueEl) return;
+  const update = () => {
+    const m = currentSpeedMultiplier();
+    valueEl.textContent = m.toFixed(1).replace(/\.0$/, '') + '×';
+    reapplyAutoplayInterval();
+  };
+  slider.addEventListener('input', update);
+  update();
+})();
 
 window.addEventListener('keydown', (ev) => {
   if (ev.key === 'ArrowRight' || ev.key === ' ') {
