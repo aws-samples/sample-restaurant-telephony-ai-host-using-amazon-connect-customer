@@ -27,7 +27,7 @@
 
 This Guidance demonstrates how to build a voice-driven telephony ordering system for quick-service restaurants (QSR). Customers dial a single United States E.164 phone number on any standard carrier and converse with an AI agent that takes the order end-to-end without screens, apps, or sign-in. The Guidance addresses the PSTN ordering channel by combining a Session Initiation Protocol (SIP) gateway, real-time speech-to-speech AI, and a decoupled scalable backend.
 
-The Guidance uses **Amazon Chime SDK Voice Connector** for SIP trunking and Public Switched Telephone Network (PSTN) inbound, **Amazon Bedrock AgentCore Runtime** for agent hosting with microVM session isolation, **Amazon Nova Sonic 2** for bidirectional speech-to-speech processing, the **Strands Agents** framework for conversational agent logic, **Amazon Location Service** for geocoding and route calculation, and **Model Context Protocol (MCP)** for standardized tool interactions between the agent and backend services. The SIP signaling and Real-time Transport Protocol (RTP) media plane runs on **Amazon Elastic Container Service (Amazon ECS) on AWS Fargate** behind an internet-facing **Network Load Balancer**. All infrastructure is deployed using **AWS Cloud Development Kit (AWS CDK)**.
+The Guidance uses **Amazon Chime SDK Voice Connector** for SIP trunking and Public Switched Telephone Network (PSTN) inbound, **Amazon Bedrock AgentCore Runtime** for agent hosting with microVM session isolation, **Amazon Nova 2 Sonic** for bidirectional speech-to-speech processing, the **Strands Agents** framework for conversational agent logic, **Amazon Location Service** for geocoding and route calculation, and **Model Context Protocol (MCP)** for standardized tool interactions between the agent and backend services. The SIP signaling and Real-time Transport Protocol (RTP) media plane runs on **Amazon Elastic Container Service (Amazon ECS) on AWS Fargate** behind an internet-facing **Network Load Balancer**. All infrastructure is deployed using **AWS Cloud Development Kit (AWS CDK)**.
 
 The architecture implements a four-section decoupled pattern:
 
@@ -47,7 +47,7 @@ graph TB
     subgraph SectionC["Section C — AgentCore Runtime"]
         ECR["Amazon ECR<br/>ARM64 image"]
         CB["AWS CodeBuild<br/>image build"]
-        RT["Amazon Bedrock AgentCore Runtime<br/>Strands BidiAgent + Nova Sonic 2"]
+        RT["Amazon Bedrock AgentCore Runtime<br/>Strands BidiAgent + Nova 2 Sonic"]
     end
 
     subgraph SectionD["Section D — Telephony Ingress"]
@@ -79,18 +79,18 @@ graph TB
 
 **Section B — AgentCore Gateway.** One AWS CDK stack creates the **Amazon Bedrock AgentCore Gateway** with MCP protocol, exposing eight backend API endpoints as discoverable MCP tools that the agent invokes by name.
 
-**Section C — AgentCore Runtime.** Three AWS CDK stacks provision **Amazon Elastic Container Registry (Amazon ECR)** for container storage, **Amazon Simple Storage Service (Amazon S3)** for source uploads, **AWS CodeBuild** for ARM64 container builds, and the **Amazon Bedrock AgentCore Runtime** itself. The agent runs the Strands Agents framework with Amazon Nova Sonic 2 for bidirectional voice streaming over a SigV4-signed WebSocket.
+**Section C — AgentCore Runtime.** Three AWS CDK stacks provision **Amazon Elastic Container Registry (Amazon ECR)** for container storage, **Amazon Simple Storage Service (Amazon S3)** for source uploads, **AWS CodeBuild** for ARM64 container builds, and the **Amazon Bedrock AgentCore Runtime** itself. The agent runs the Strands Agents framework with Amazon Nova 2 Sonic for bidirectional voice streaming over a SigV4-signed WebSocket.
 
 **Section D — Telephony Ingress.** Four AWS CDK stacks provision the SIP and media path: **Amazon Chime SDK Voice Connector** with a toll-free Direct Inward Dialing (DID) number, an **AWS Lambda** SIP Media Application (SMA) event handler, a shared Amazon Virtual Private Cloud (Amazon VPC), and the SIP gateway itself: an internet-facing Network Load Balancer plus a two-task Amazon ECS on AWS Fargate service running drachtio-server and a Node.js Real-time Transport Protocol bridge. SIP signaling rides Transmission Control Protocol (TCP) port 5060 through the load balancer; media (RTP/UDP 16000–16048) flows direct from Amazon Chime SDK Voice Connector to each task's auto-assigned public Internet Protocol (IP) address, with the task security group locked to the published Amazon Chime SDK Voice Connector source CIDRs.
 
 ### User request flow
 
 1. The caller dials the United States E.164 toll-free phone number provisioned by **Amazon Chime SDK Voice Connector**. The carrier delivers the call to the Amazon Chime SDK Voice Connector edge.
-2. The Voice Connector triggers the **AWS Lambda** SIP Media Application handler with `NEW_INBOUND_CALL`. The handler derives a deterministic session identifier from the caller's phone number hashed with a server-side pepper from **AWS Systems Manager Parameter Store**, then issues a SigV4-signed `POST /invocations` warmup request to **Amazon Bedrock AgentCore Runtime** carrying that session identifier as the `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header. AgentCore Runtime allocates a microVM, binds the session identifier to it, and routes the warmup request to the agent container, which runs the expensive per-call setup (system prompt resolution via the prompt-renderer Lambda, Amazon Nova Sonic 2 stream open, Model Context Protocol tool discovery, agent priming) inside the warmup window and stashes the result in a microVM-local cache keyed by the session identifier. The handler returns a `CallAndBridge` action pointing back at the Voice Connector with the session identifier propagated as a custom Session Initiation Protocol (SIP) header `X-Session-Id`.
+2. The Voice Connector triggers the **AWS Lambda** SIP Media Application handler with `NEW_INBOUND_CALL`. The handler derives a deterministic session identifier from the caller's phone number hashed with a server-side pepper from **AWS Systems Manager Parameter Store**, then issues a SigV4-signed `POST /invocations` warmup request to **Amazon Bedrock AgentCore Runtime** carrying that session identifier as the `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header. AgentCore Runtime allocates a microVM, binds the session identifier to it, and routes the warmup request to the agent container, which runs the expensive per-call setup (system prompt resolution via the prompt-renderer Lambda, Amazon Nova 2 Sonic stream open, Model Context Protocol tool discovery, agent priming) inside the warmup window and stashes the result in a microVM-local cache keyed by the session identifier. The handler returns a `CallAndBridge` action pointing back at the Voice Connector with the session identifier propagated as a custom Session Initiation Protocol (SIP) header `X-Session-Id`.
 3. The Voice Connector originates a SIP INVITE over Transmission Control Protocol port 5060 to the **Network Load Balancer** Domain Name System (DNS) name. The load balancer forwards the connection to one of the **Amazon ECS on AWS Fargate** tasks running drachtio-server. The bridged INVITE carries the `X-Session-Id` header forward unchanged.
 4. The Fargate task answers with `200 OK`. The Session Description Protocol (SDP) `c=` line carries the task's own auto-assigned public IP address, so Real-time Transport Protocol media flows direct from Amazon Chime SDK Voice Connector to the task on User Datagram Protocol (UDP) ports 16000-16048 — the load balancer is not in the media path.
 5. The task's Node.js bridge reads the `X-Session-Id` SIP header and opens a SigV4-signed WebSocket to **Amazon Bedrock AgentCore Runtime** pinned to the same session identifier. AgentCore Runtime routes the WebSocket to the warmed microVM (microVM stickiness), and the agent container attaches to the pre-built call context in milliseconds via the warm-cache lookup. Inbound caller audio (G.711 mu-law at 8 kHz) is decoded and resampled to 16 kHz Linear Pulse Code Modulation (PCM) and forwarded over the WebSocket; agent audio is paced back to the caller in 20-millisecond Real-time Transport Protocol frames.
-6. The runtime drives the **Amazon Nova Sonic 2** bidirectional session that was opened during warmup. The Strands Agents framework drives turn-taking, transcription, and tool use; a 20-second silence-frame keepalive on the agent side prevents the model's 55-second server-side idle timeout during long backend tool calls.
+6. The runtime drives the **Amazon Nova 2 Sonic** bidirectional session that was opened during warmup. The Strands Agents framework drives turn-taking, transcription, and tool use; a 20-second silence-frame keepalive on the agent side prevents the model's 55-second server-side idle timeout during long backend tool calls.
 7. When the agent invokes a tool (`GetMenu`, `AddToCart`, `PlaceOrder`, `GetPreviousOrders`, and others), **Amazon Bedrock AgentCore Gateway** forwards the call as a REST request to **Amazon API Gateway**, which routes to **AWS Lambda** business handlers that read or write **Amazon DynamoDB** and call **Amazon Location Service** for geocoding. `GetPreviousOrders` enriches each order row with the location's address fields by issuing a `BatchGetCommand` against the Locations table so the agent can refer to a caller's previous pickup location by street name rather than an internal identifier.
 8. When the call ends, the Fargate bridge issues a SigV4-signed `StopRuntimeSession` to AgentCore Runtime so the per-session microVM slot is released against the account-level Active session workloads quota.
 9. **AWS CDK** deploys the entire solution with one shell script that uploads source to **Amazon S3**, triggers **AWS CodeBuild** to build the ARM64 container image stored in **Amazon ECR**, and provisions the eleven CloudFormation stacks in dependency order.
@@ -110,7 +110,7 @@ The following table provides a sample cost breakdown for deploying this Guidance
 | ----------- | ---------- | ---------- |
 | [Amazon Chime SDK PSTN Audio (toll-free inbound)](https://aws.amazon.com/chime/chime-sdk/pricing/) | 5,000 inbound minutes at $0.012 per minute | $60.00 |
 | [Amazon ECS on AWS Fargate (ARM64)](https://aws.amazon.com/fargate/pricing/) | 2 tasks, 1 vCPU + 2 GB memory each, 730 hours per month | $72.08 |
-| [Amazon Bedrock (Nova Sonic 2)](https://aws.amazon.com/bedrock/pricing/) | ~680 input + ~5,083 output speech tokens per session, ~7,438 input + ~1,260 output text tokens per session, 1,000 sessions | $68.96 |
+| [Amazon Bedrock (Nova 2 Sonic)](https://aws.amazon.com/bedrock/pricing/) | ~680 input + ~5,083 output speech tokens per session, ~7,438 input + ~1,260 output text tokens per session, 1,000 sessions | $68.96 |
 | [Amazon Network Load Balancer](https://aws.amazon.com/elasticloadbalancing/pricing/) | 1 internet-facing load balancer, 730 hours, modest LCU usage | $21.43 |
 | [Amazon Bedrock AgentCore Runtime](https://aws.amazon.com/bedrock/agentcore/pricing/) | 1,000 sessions, ~5 minutes each, ~30% active CPU, 1 vCPU, 2 GB memory | $5.20 |
 | [Amazon Chime SDK Voice Connector](https://aws.amazon.com/chime/chime-sdk/pricing/) | 5,000 minutes at $0.00071 per minute, 1 toll-free phone number at $2.00 per month | $5.55 |
@@ -130,7 +130,7 @@ The following table provides a sample cost breakdown for deploying this Guidance
 - Toll-free per-minute charges and always-on Amazon ECS on AWS Fargate task hours are the dominant cost drivers (about 56 percent of the total).
 - Switching from a toll-free to a local Direct Inward Dialing number reduces the inbound minute charge from $0.012 per minute to about $0.0011 per minute, lowering the monthly estimate by roughly $54.
 - Right-sizing or scaling the Amazon ECS on AWS Fargate fleet to zero outside business hours is a viable cost optimization once traffic patterns are known.
-- Amazon Nova Sonic 2 output speech tokens drive Amazon Bedrock cost; observed pricing is consistent with the public quick-service-restaurant ordering reference architecture.
+- Amazon Nova 2 Sonic output speech tokens drive Amazon Bedrock cost; observed pricing is consistent with the public quick-service-restaurant ordering reference architecture.
 - Costs scale roughly linearly with call volume above the always-on baseline.
 
 ## Prerequisites
@@ -152,8 +152,8 @@ The agent container is Python 3.13, but a developer with only the four tools abo
 
 ### AWS account requirements
 
-- AWS Identity and Access Management permissions to deploy AWS CDK stacks and AWS CloudFormation templates, and to create resources in: Amazon Chime SDK PSTN Audio, Amazon Bedrock AgentCore Runtime and Gateway, Amazon Bedrock (Nova Sonic 2), AWS Lambda, Amazon DynamoDB, Amazon Location Service, Amazon API Gateway, Amazon ECR, AWS CodeBuild, Amazon S3, Amazon CloudWatch Logs and Metrics, AWS Systems Manager Parameter Store, Amazon ECS, AWS Fargate, Amazon VPC, and AWS Identity and Access Management.
-- Amazon Bedrock model access for **Amazon Nova Sonic 2** (`amazon.nova-2-sonic-v1:0`). Request access through the [Amazon Bedrock console](https://console.aws.amazon.com/bedrock/) model access page.
+- AWS Identity and Access Management permissions to deploy AWS CDK stacks and AWS CloudFormation templates, and to create resources in: Amazon Chime SDK PSTN Audio, Amazon Bedrock AgentCore Runtime and Gateway, Amazon Bedrock (Nova 2 Sonic), AWS Lambda, Amazon DynamoDB, Amazon Location Service, Amazon API Gateway, Amazon ECR, AWS CodeBuild, Amazon S3, Amazon CloudWatch Logs and Metrics, AWS Systems Manager Parameter Store, Amazon ECS, AWS Fargate, Amazon VPC, and AWS Identity and Access Management.
+- Amazon Bedrock model access for **Amazon Nova 2 Sonic** (`amazon.nova-2-sonic-v1:0`). Request access through the [Amazon Bedrock console](https://console.aws.amazon.com/bedrock/) model access page.
 - Amazon Chime SDK PSTN Audio access. Phone-number ordering is governed by a separate AWS service quota; if you have never ordered an Amazon Chime SDK phone number in this account, request a quota increase through the [Amazon Chime SDK console](https://console.aws.amazon.com/chime-sdk/) before deployment.
 
 ### AWS CDK bootstrap
@@ -170,7 +170,7 @@ Replace `<ACCOUNT_ID>` with your AWS account ID and `<REGION>` with your target 
 
 Deploy in a Region where all three of the following are available:
 
-- Amazon Bedrock model access for Amazon Nova Sonic 2 (`amazon.nova-2-sonic-v1:0`).
+- Amazon Bedrock model access for Amazon Nova 2 Sonic (`amazon.nova-2-sonic-v1:0`).
 - Amazon Chime SDK PSTN Audio.
 - Amazon Bedrock AgentCore Runtime.
 
@@ -321,7 +321,7 @@ Agent:  You are welcome — order confirmed. Have a great day.
 
 ### Expected output
 
-- **Voice transcription.** The caller's speech is transcribed by Amazon Nova Sonic 2 and visible in the Amazon CloudWatch Logs stream for the runtime.
+- **Voice transcription.** The caller's speech is transcribed by Amazon Nova 2 Sonic and visible in the Amazon CloudWatch Logs stream for the runtime.
 - **Agent response.** A natural voice response with order details streams back to the caller in real time over the WebSocket and the Real-time Transport Protocol media stream.
 - **Tool invocations.** Backend tools (`GetMenu`, `AddToCart`, `GetCustomerProfile`, `GeocodeAddress`, `PlaceOrder`, and others) are called asynchronously through Amazon Bedrock AgentCore Gateway.
 - **Order confirmation.** Order ID, total, and estimated ready time are spoken back to the caller and persisted in Amazon DynamoDB.
@@ -329,7 +329,7 @@ Agent:  You are welcome — order confirmed. Have a great day.
 ### Debugging and logging
 
 - **SIP gateway logs.** Amazon CloudWatch Logs at `/ecs/<prefix>-sip-gateway` capture every SIP transaction (INVITE, 200 OK, ACK, BYE) and Real-time Transport Protocol bridge events from drachtio-server and the Node.js bridge.
-- **Agent logs.** Amazon CloudWatch Logs at `/aws/bedrock-agentcore/runtimes/<runtime-name>` show the Strands Agents framework events, Amazon Nova Sonic 2 turn-taking, and tool-call details.
+- **Agent logs.** Amazon CloudWatch Logs at `/aws/bedrock-agentcore/runtimes/<runtime-name>` show the Strands Agents framework events, Amazon Nova 2 Sonic turn-taking, and tool-call details.
 - **Lambda logs.** Amazon CloudWatch Logs at `/aws/lambda/<function-name>` for every ordering function and the SIP Media Application handler.
 - **Amazon API Gateway logs.** Amazon CloudWatch Logs for the REST endpoint, with full request and response visibility on each tool call.
 - **Custom metrics.** Active call counts per task and per service are published to the `<prefix>/SipGateway` Amazon CloudWatch namespace and drive autoscaling.
@@ -341,7 +341,7 @@ Consider the following enhancements after deploying this Guidance:
 - **Verified customer identification.** Layer one-time-password verification on top of the pseudonymous phone-hash and add a `phoneNumber` Global Secondary Index on `<prefix>-Customers`.
 - **Inbound interactive voice response options** through Amazon Chime SDK `SpeakAndGetDigits`.
 - **Outbound callbacks** ("your order is ready") through `CreateSipMediaApplicationCall`.
-- **Multi-language support.** Amazon Nova Sonic 2 supports additional languages; extend the system prompt and menu data and configure voice selection per detected language.
+- **Multi-language support.** Amazon Nova 2 Sonic supports additional languages; extend the system prompt and menu data and configure voice selection per detected language.
 - **Long-term call recording.** Configure Amazon S3 lifecycle and Amazon Chime SDK Voice Connector streaming for compliance or quality-assurance retention.
 - **Call detail records.** Add an `<prefix>-CallDetailRecords` Amazon DynamoDB table and write one row per call on hangup for operational reporting.
 - **Cross-region failover.** Deploy a second Region and use Amazon Route 53 latency-based routing with health checks for geographic redundancy.
@@ -407,7 +407,7 @@ Open the [AWS CloudFormation console](https://console.aws.amazon.com/cloudformat
 
 ### Additional considerations
 
-- **Amazon Bedrock pricing.** Amazon Nova Sonic 2 charges per token (input and output). Output speech tokens are the dominant model-side cost driver. Monitor usage with Amazon CloudWatch and AWS Cost Explorer.
+- **Amazon Bedrock pricing.** Amazon Nova 2 Sonic charges per token (input and output). Output speech tokens are the dominant model-side cost driver. Monitor usage with Amazon CloudWatch and AWS Cost Explorer.
 - **Amazon Chime SDK PSTN per-minute charges.** Toll-free inbound minutes are the dominant telephony-side cost. Switching to a local Direct Inward Dialing number reduces this cost by roughly an order of magnitude.
 - **Network egress and Network Address Translation.** The agent reaches Amazon Bedrock, Amazon Chime SDK Voice Connector, Amazon S3, Amazon ECR, and Amazon CloudWatch through Network Address Translation gateways. Amazon VPC interface endpoints for Amazon S3, Amazon ECR, AWS Systems Manager, and AWS CloudWatch Logs are a valid cost optimization for steady-state traffic; they are not enabled by default.
 - **Data retention.** Per-call session state lives only in memory on the Amazon ECS on AWS Fargate task and in Amazon Bedrock AgentCore Runtime. Long-term call recording and call detail records are out of scope for this Guidance. Configure Amazon DynamoDB time-to-live on `<prefix>-Carts` for automatic cleanup of stale carts.
@@ -418,7 +418,7 @@ Open the [AWS CloudFormation console](https://console.aws.amazon.com/cloudformat
 ### Limitations
 
 - **Telephony only.** The Guidance has no web user interface, mobile application, or browser client.
-- **English only.** The system prompt and menu are configured for English. Amazon Nova Sonic 2 supports additional languages that can be enabled by modifying the system prompt and adding a voice for each.
+- **English only.** The system prompt and menu are configured for English. Amazon Nova 2 Sonic supports additional languages that can be enabled by modifying the system prompt and adding a voice for each.
 - **No device GPS.** The agent asks the caller for a ZIP code or cross-street and uses Amazon Location Service for geocoding.
 - **One call, one Amazon Bedrock AgentCore Runtime session.** Each call runs to completion in its own session; there is no cross-call state on the runtime.
 - **Single Region.** The Guidance deploys into one AWS Region. Cross-Region failover is documented under Next Steps and is not provided out of the box.
@@ -427,8 +427,8 @@ For feedback, questions, or suggestions, open an issue in the repository.
 
 ## Revisions
 
-- **v3.1.0 (May 2026)** — Cold-start mitigation, prompt-rendering pipeline, and operator ergonomics. The Session Initiation Protocol Media Application Lambda issues a SigV4-signed warmup `POST /invocations` to Amazon Bedrock AgentCore Runtime with a deterministic session identifier derived from the caller's phone number, allowing the agent container to do the per-call setup work (system prompt resolution, Amazon Nova Sonic 2 stream open, Model Context Protocol tool discovery) inside the ringing window before the bridged Session Initiation Protocol INVITE arrives. The Session Initiation Protocol gateway reuses the same session identifier on its WebSocket connection so the call attaches to the pre-warmed microVM. Brand identity is now a deploy-time variable: the `--synth-business-name` flag threads through AWS Cloud Development Kit context and substitutes a `{BUSINESS_NAME}` placeholder in both system prompts at synth time. The `GetPreviousOrders` Lambda now enriches each order row with location address fields via `BatchGetCommand` so the agent can reference previous pickup locations by street name rather than an internal identifier. Both system prompts moved to AWS Systems Manager Parameter Store Advanced tier to fit a strengthened "no internal identifiers" guard and per-tool filler-phrase guidance. The deploy script auto-recovers the deployment prefix from the local state file when the operator omits the flag.
-- **v3.0.0 (May 2026)** — Architecture pivot to Real-time Transport Protocol direct from Amazon Chime SDK Voice Connector to the Amazon ECS on AWS Fargate task's auto-assigned public IP address. The Network Load Balancer carries Session Initiation Protocol on Transmission Control Protocol port 5060 only; media bypasses the load balancer entirely. Two-IP-split between the SIP Contact header (Network Load Balancer Elastic IP) and the SDP `c=` line (task public IP). Twenty-second silence-frame keepalive on the agent side prevents the Amazon Nova Sonic 2 fifty-five-second server-side idle timeout.
+- **v3.1.0 (May 2026)** — Cold-start mitigation, prompt-rendering pipeline, and operator ergonomics. The Session Initiation Protocol Media Application Lambda issues a SigV4-signed warmup `POST /invocations` to Amazon Bedrock AgentCore Runtime with a deterministic session identifier derived from the caller's phone number, allowing the agent container to do the per-call setup work (system prompt resolution, Amazon Nova 2 Sonic stream open, Model Context Protocol tool discovery) inside the ringing window before the bridged Session Initiation Protocol INVITE arrives. The Session Initiation Protocol gateway reuses the same session identifier on its WebSocket connection so the call attaches to the pre-warmed microVM. Brand identity is now a deploy-time variable: the `--synth-business-name` flag threads through AWS Cloud Development Kit context and substitutes a `{BUSINESS_NAME}` placeholder in both system prompts at synth time. The `GetPreviousOrders` Lambda now enriches each order row with location address fields via `BatchGetCommand` so the agent can reference previous pickup locations by street name rather than an internal identifier. Both system prompts moved to AWS Systems Manager Parameter Store Advanced tier to fit a strengthened "no internal identifiers" guard and per-tool filler-phrase guidance. The deploy script auto-recovers the deployment prefix from the local state file when the operator omits the flag.
+- **v3.0.0 (May 2026)** — Architecture pivot to Real-time Transport Protocol direct from Amazon Chime SDK Voice Connector to the Amazon ECS on AWS Fargate task's auto-assigned public IP address. The Network Load Balancer carries Session Initiation Protocol on Transmission Control Protocol port 5060 only; media bypasses the load balancer entirely. Two-IP-split between the SIP Contact header (Network Load Balancer Elastic IP) and the SDP `c=` line (task public IP). Twenty-second silence-frame keepalive on the agent side prevents the Amazon Nova 2 Sonic fifty-five-second server-side idle timeout.
 - **v2.0.0 (May 2026)** — drachtio-server SIP gateway on Amazon ECS on AWS Fargate replaces the previous Amazon Kinesis Video Streams plus Amazon Chime SDK PlayAudio architecture. SigV4-signed WebSocket between the SIP gateway and Amazon Bedrock AgentCore Runtime carries audio in both directions. Eleven AWS CDK stacks, all owned by this project, with no external reference-project dependency.
 - **v1.0.0 (April 2026)** — Initial release. Amazon Bedrock AgentCore Runtime with `protocolConfiguration = HTTP` and `networkMode = VPC`. Single ARM64 container per call read Amazon Kinesis Video Streams and wrote Amazon Chime SDK `PlayAudio` directly. Five AWS CDK stacks: `NetworkStack`, `AgentEcrStack`, `AgentBuildStack`, `AgentRuntimeStack`, `IngressStack`. Python 3.13 agent and Node.js 24.x Lambdas.
 

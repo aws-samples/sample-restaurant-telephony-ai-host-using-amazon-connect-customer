@@ -440,7 +440,7 @@ const NODES = {
   drachtio:   { x: 490, y: 290, w: 140, h: 78, label: 'drachtio-server',   sub: 'SIP · Sofia-SIP',               icon: 'fargate' },
   rtpBridge:  { x: 490, y: 450, w: 140, h: 78, label: 'Node RTP Bridge',   sub: '<b>public IP :16000-48</b>',    icon: 'fargate' },
   // AgentCore services — Nova Sonic, Runtime (middle, hub), Gateway.
-  novaSonic:  { x: 680, y: 290, w: 150, h: 78, label: 'Nova Sonic 2',      sub: 'Amazon Bedrock · bidi',         icon: 'bedrock' },
+  novaSonic:  { x: 680, y: 290, w: 150, h: 78, label: 'Nova 2 Sonic',      sub: 'Amazon Bedrock · bidi',         icon: 'bedrock' },
   runtime:    { x: 680, y: 450, w: 150, h: 78, label: 'AgentCore Runtime', sub: 'Strands BidiAgent',             icon: 'agentcore' },
   mcpGw:      { x: 680, y: 610, w: 150, h: 78, label: 'AgentCore Gateway', sub: 'MCP · AWS_IAM',                 icon: 'agentcore' },
   // Data + Backend.
@@ -612,8 +612,8 @@ const STEPS = [
   },
   {
     title: 'Agent attaches to the pre-warmed context',
-    body: 'Because the warmup POST already ran the prompt resolution, customer lookup, MCP tool discovery, and Nova Sonic stream open, the <span class="hl">/ws</span> handler does a single <code>_warm_sessions.pop(session_id)</code> and starts streaming audio immediately. The pre-built BidiAgent and the open Nova Sonic 2 bidi stream are both already alive — the agent just hooks the WebSocket in and starts paced reads + writes.',
-    meta: { 'Cache lookup': 'O(ms)', Model: 'amazon.nova-sonic-v2', Voice: 'tiffany', 'Connected since': 'warmup tick (~1-2s ago)' },
+    body: 'Because the warmup POST already ran the prompt resolution, customer lookup, MCP tool discovery, and Nova Sonic stream open, the <span class="hl">/ws</span> handler does a single <code>_warm_sessions.pop(session_id)</code> and starts streaming audio immediately. The pre-built BidiAgent and the open Nova 2 Sonic bidi stream are both already alive — the agent just hooks the WebSocket in and starts paced reads + writes.',
+    meta: { 'Cache lookup': 'O(ms)', Model: 'amazon.nova-2-sonic-v1:0', Voice: 'tiffany', 'Connected since': 'warmup tick (~1-2s ago)' },
     nodes: ['runtime', 'novaSonic'],
     edges: [
       { edge: 'runtime-nova', kind: 'ctrl' },
@@ -693,7 +693,7 @@ const STEPS = [
   {
     title: 'Nova Sonic speaks the tool result back',
     body: 'With the menu data in hand, Nova Sonic generates a natural voice response and streams it back through the same path as the greeting: <span class="hl">Nova Sonic → AgentCore Runtime → WebSocket → Node bridge → direct RTP to Chime → caller\'s phone</span>. The customer hears the menu, picks an item, and the conversation continues — every subsequent turn loops through steps 13-16.',
-    meta: { Output: 'Amazon Nova Sonic 2 · tiffany voice', 'Sample rate': '16 kHz L16 → 8 kHz μ-law', Direction: 'DOWN', 'Conversation loop': 'steps 13-16 repeat per turn' },
+    meta: { Output: 'Amazon Nova 2 Sonic · tiffany voice', 'Sample rate': '16 kHz L16 → 8 kHz μ-law', Direction: 'DOWN', 'Conversation loop': 'steps 13-16 repeat per turn' },
     nodes: ['novaSonic', 'runtime', 'rtpBridge', 'chimeVC', 'caller'],
     edges: [
       { edge: 'nova-runtime', kind: 'audioOut' },

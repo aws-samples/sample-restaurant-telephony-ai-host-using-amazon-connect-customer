@@ -1,7 +1,7 @@
 """Telephony Voice Ordering Agent — Bedrock AgentCore Runtime (r7.1).
 
 WebSocket server that bridges the drachtio SIP gateway's Node.js Real-time
-Transport Protocol bridge to Strands' BidiAgent + Nova Sonic 2 for
+Transport Protocol bridge to Strands' BidiAgent + Nova 2 Sonic for
 real-time voice ordering over the PSTN (Public Switched Telephone
 Network).
 

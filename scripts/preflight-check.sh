@@ -8,7 +8,7 @@
 #   - git present
 #   - AWS credentials reachable (only when aws CLI present)
 #   - CDK bootstrap >= v6 in the current region; auto-offer to fix
-#   - Bedrock Nova Sonic v2 model access granted (warn-only if missing)
+#   - Bedrock Nova 2 Sonic model access granted (warn-only if missing)
 #   - NFR4 assertion: python/pip/poetry/uv/etc. are NOT required at the dev layer.
 #
 # Exits 0 on success. Exits 1 on any hard failure (unfixed bootstrap counts).
@@ -157,7 +157,7 @@ elif [ "$CDK_AVAILABLE" = true ] && [ "$AWS_CREDS_OK" = false ]; then
   warn "Skipping CDK Bootstrap check — AWS credentials not configured"
 fi
 
-# Bedrock Nova Sonic v2 access (warn-only — the agent needs it at runtime,
+# Bedrock Nova 2 Sonic access (warn-only — the agent needs it at runtime,
 # not at deploy time, so we do not block).
 if [ "$AWS_CLI_OK" = true ] && [ "$AWS_CREDS_OK" = true ]; then
   REGION=$(aws configure get region 2>/dev/null || echo "us-east-1")
@@ -165,9 +165,9 @@ if [ "$AWS_CLI_OK" = true ] && [ "$AWS_CREDS_OK" = true ]; then
         --region "$REGION" \
         --query "modelSummaries[?contains(modelId, 'nova-sonic')].modelId" \
         --output text 2>/dev/null | grep -q "nova-sonic"; then
-    pass "Bedrock Nova Sonic v2 access granted in $REGION"
+    pass "Bedrock Nova 2 Sonic access granted in $REGION"
   else
-    warn "Bedrock Nova Sonic v2 access not granted in $REGION — request it in the Bedrock console before dialing"
+    warn "Bedrock Nova 2 Sonic access not granted in $REGION — request it in the Bedrock console before dialing"
   fi
 fi
 
