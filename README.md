@@ -185,8 +185,8 @@ For automated deployment, the script `scripts/deploy-all.sh` provisions every AW
 **Usage:**
 
 ```bash
-git clone <this-repo-url>
-cd telephony-voice-ordering-agent
+git clone https://github.com/aws-samples/sample-restaurant-telephony-ai-host-using-amazon-bedrock-agentcore-nova-sonic.git
+cd sample-restaurant-telephony-ai-host-using-amazon-bedrock-agentcore-nova-sonic
 
 # 1. Preflight — verifies Node.js, npm, AWS CLI, git, AWS CDK bootstrap, and Amazon Bedrock model access.
 ./scripts/preflight-check.sh
