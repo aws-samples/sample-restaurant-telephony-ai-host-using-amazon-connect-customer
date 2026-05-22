@@ -32,6 +32,7 @@ source "$SCRIPT_DIR/deployment-state.sh"
 
 # Defaults
 PROJECT_PREFIX="qsr-tel"
+PROJECT_PREFIX_EXPLICIT=false  # set true when --deploymentPrefix is passed
 MODE="update"          # update (idempotent) | fresh (clean redeploy)
 FORCE_DEPLOY=false
 SKIP_PREFLIGHT=false
@@ -56,7 +57,7 @@ SYNTH_BUSINESS_NAME=""
 # Parse arguments
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --deploymentPrefix) PROJECT_PREFIX="$2"; shift 2 ;;
+    --deploymentPrefix) PROJECT_PREFIX="$2"; PROJECT_PREFIX_EXPLICIT=true; shift 2 ;;
     --mode)             MODE="$2";           shift 2 ;;
     --force-deploy)     FORCE_DEPLOY=true;   shift ;;
     --skip-preflight)   SKIP_PREFLIGHT=true; shift ;;
@@ -255,6 +256,41 @@ json_stdin() {
 ################################################################################
 # Up-front validation
 ################################################################################
+
+# Auto-heal: if --deploymentPrefix was not passed AND .deployment-state.json
+# already records a prefix from a previous run, prefer that prefix over the
+# hard-coded "qsr-tel" default. This prevents the operator-foot-gun where
+# `./scripts/deploy-all.sh --only tel-agent-runtime --force-deploy` (no
+# --deploymentPrefix) would default to "qsr-tel" and try to swap every
+# physical resource name on a stack that lives at "dev". The pepper-manager
+# custom resource (and other safety guards) refuse this swap and the stack
+# lands in UPDATE_ROLLBACK_FAILED requiring `continue-update-rollback
+# --resources-to-skip CustomerIdPepper` to recover.
+#
+# Detection rule: any component in .deployment-state.json with deployed=true
+# and a prefix value. We use the FIRST such component's prefix (the file is
+# always written consistently across components by update_state — they all
+# share the same prefix).
+#
+# Operator override: passing --deploymentPrefix explicitly always wins. Useful
+# when intentionally cloning a deployment under a new prefix (in which case
+# the operator should run from a fresh working copy per the cross-prefix
+# guard's instruction).
+if [ "$PROJECT_PREFIX_EXPLICIT" = false ] && [ -f "$WORKSPACE_ROOT/.deployment-state.json" ]; then
+  STATE_PREFIX=$(node -e "
+    try {
+      const s = JSON.parse(require('fs').readFileSync('$WORKSPACE_ROOT/.deployment-state.json', 'utf8'));
+      const c = s.components || {};
+      for (const k of Object.keys(c)) {
+        if (c[k] && c[k].deployed === true && c[k].prefix) { console.log(c[k].prefix); break; }
+      }
+    } catch { /* state file unreadable — fall through to default */ }
+  " 2>/dev/null || true)
+  if [ -n "$STATE_PREFIX" ] && [ "$STATE_PREFIX" != "$PROJECT_PREFIX" ]; then
+    print_warning "deploymentPrefix not specified; using \"$STATE_PREFIX\" from .deployment-state.json (was default \"$PROJECT_PREFIX\")"
+    PROJECT_PREFIX="$STATE_PREFIX"
+  fi
+fi
 
 # Validate prefix once, up front. Each stack also re-validates via
 # CfnParameter.allowedPattern at deploy time.
