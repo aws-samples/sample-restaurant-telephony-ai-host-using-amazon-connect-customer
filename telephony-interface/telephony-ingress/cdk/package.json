@@ -13,7 +13,7 @@
   "devDependencies": {
     "@types/jest": "^30",
     "@types/node": "^24.10.1",
-    "aws-cdk": "2.1120.0",
+    "aws-cdk": "^2.1125.0",
     "esbuild": "^0.27.3",
     "jest": "^30",
     "ts-jest": "^29",
@@ -21,7 +21,7 @@
     "typescript": "~5.9.3"
   },
   "dependencies": {
-    "aws-cdk-lib": "^2.238.0",
+    "aws-cdk-lib": "^2.257.0",
     "cdk-amazon-chime-resources": "^3",
     "cdk-nag": "^2",
     "constructs": "^10.0.0"
