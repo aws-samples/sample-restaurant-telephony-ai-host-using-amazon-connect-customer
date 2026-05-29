@@ -875,7 +875,7 @@ if should_deploy tel-agent-runtime; then
     npx cdk deploy AgentRuntimeStack \
       --require-approval never \
       $CDK_ROLLBACK_FLAG \
-      "${BUSINESS_NAME_CONTEXT_FLAG[@]}" \
+      ${BUSINESS_NAME_CONTEXT_FLAG[@]+"${BUSINESS_NAME_CONTEXT_FLAG[@]}"} \
       --parameters "AgentRuntimeStack:DeploymentPrefix=${PROJECT_PREFIX}" \
       --parameters "AgentRuntimeStack:AgentEcrRepoUri=${ECR_URI}" \
       --parameters "AgentRuntimeStack:AgentCoreGatewayUrl=${GATEWAY_URL}" \
