@@ -41,18 +41,38 @@ ONLY_COMPONENT=""      # empty = deploy all layers; when set, run ONLY that one
 LOW_STORAGE_MODE=false # --low-storage-mode: wipe sibling node_modules before each npm install
 OUTPUTS_DIR="cdk-outputs"
 
-# Synthetic-data options. Populated from --user-name/--user-phone flags; the
-# layer itself runs only when either --with-synthetic-data is passed OR the
-# operator answers "yes" at the interactive prompt. Email is synthesized from
-# --user-name inside populate-data.js so the schema parity with the reference
-# Customers table stays intact without exposing a second flag.
+# Synthetic-data options.
+#
+# As of the default-seed change: synthetic data is seeded by DEFAULT — the
+# demo is hollow without Locations + Menu rows (every caller dead-ends as
+# anonymous with no menu). Pass --skip-synthetic-data to opt out entirely.
+#
+# Sensible defaults are applied when the operator omits a flag so a bare
+# `./scripts/deploy-all.sh --deploymentPrefix foo` produces a working demo:
+#   --user-name           default "Jane Doe"            (loyalty display name)
+#   --synth-location      default "Dallas, Texas"       (Geo Places anchor)
+#   --synth-business-name default "Burger Restaurants"  (Geo Places query)
+#   --company-name        default "Amazing Burgers"     (brand on prompt + rows)
+#
+# --user-phone has NO default: it is the loyalty caller's real phone number
+# (the number you dial from during the demo), which only the operator knows.
+# When it is omitted we seed Locations + Menu only (anonymous-only demo) and
+# skip the loyalty Customer + Orders rows. A later run that supplies
+# --user-phone adds the loyalty data on top.
 USER_NAME=""
 USER_PHONE=""
 COMPANY_NAME=""
-WITH_SYNTHETIC_DATA=false
-SKIP_SYNTHETIC_DATA=false
+WITH_SYNTHETIC_DATA=false   # explicit opt-in; seeding is now default-on anyway
+SKIP_SYNTHETIC_DATA=false   # the opt-out
+ASSUME_YES=false            # --yes / --non-interactive: never block on a prompt
 SYNTH_LOCATION=""
 SYNTH_BUSINESS_NAME=""
+
+# Defaults applied at seed time when the operator omits the flag.
+DEFAULT_USER_NAME="Jane Doe"
+DEFAULT_SYNTH_LOCATION="Dallas, Texas"
+DEFAULT_SYNTH_BUSINESS_NAME="Burger Restaurants"
+DEFAULT_COMPANY_NAME="Amazing Burgers"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -70,6 +90,7 @@ while [[ $# -gt 0 ]]; do
     --company-name)         COMPANY_NAME="$2";         shift 2 ;;
     --with-synthetic-data)  WITH_SYNTHETIC_DATA=true;  shift ;;
     --skip-synthetic-data)  SKIP_SYNTHETIC_DATA=true;  shift ;;
+    --yes|--non-interactive) ASSUME_YES=true;          shift ;;
     --synth-location)       SYNTH_LOCATION="$2";       shift 2 ;;
     --synth-business-name)  SYNTH_BUSINESS_NAME="$2";  shift 2 ;;
     --help)
@@ -128,45 +149,55 @@ Options:
                               with available inventory.
   --user-name "<name>"        Display name used by the seeded loyalty
                               customer when --with-synthetic-data runs.
+  --user-name "<name>"        Display name for the seeded loyalty customer.
+                              Defaults to "Jane Doe" when omitted.
                               Mirrors reference-project --user-name.
   --user-phone <E.164>        E.164 phone number ("+12125550100") used as
-                              the seeded loyalty customer's caller id.
-                              Replaces reference-project's --user-email
-                              since the telephony agent keys customers
-                              by phone (hashed via the customer-id pepper).
+                              the seeded loyalty customer's caller id
+                              (the number you dial from during the demo).
+                              NO default — it is the only loyalty field
+                              that must be a real number you control. When
+                              omitted, synthetic data still seeds Locations
+                              + Menu (anonymous demo works end-to-end) but
+                              skips the loyalty Customer + Orders rows. Add
+                              the loyalty caller later by re-running with
+                              --only tel-synthetic-data --user-phone +1...
   --company-name "<brand>"    Brand identity for the deployment.
                               (1) Rebrands every synthetic-data location's
                               display name to this value.
                               (2) Substitutes {BUSINESS_NAME} in the
                               Telephony agent's system prompt at CDK synth
                               time so the agent greets callers as this
-                              brand. Optional; defaults to "Amazing Burgers"
-                              when omitted. Use this flag when the brand
-                              you want to demo doesn't have enough real
+                              brand. Defaults to "Amazing Burgers" when
+                              omitted. Use this flag when the brand you
+                              want to demo doesn't have enough real
                               locations in your test region — pair with
                               --synth-business-name set to a broader
                               search term (e.g. demo as "Amazing Burgers"
                               while seeding from "Burger Restaurants").
-  --with-synthetic-data       Run the tel-synthetic-data layer non-
-                              interactively. Requires --user-name +
-                              --user-phone and either --synth-location
-                              + --synth-business-name OR the interactive
-                              defaults (skipped in --non-interactive).
-  --skip-synthetic-data       Skip the tel-synthetic-data layer entirely.
-                              No prompt.
-  --synth-location "<where>"  City / zip / address / "lat,lon" passed
-                              through to populate-data.js. Required in
-                              --with-synthetic-data unattended mode.
+  --with-synthetic-data       Explicit opt-in for the tel-synthetic-data
+                              layer. NOTE: seeding is now ON BY DEFAULT, so
+                              this flag is a harmless no-op kept for
+                              backward compatibility. Use --skip-synthetic-
+                              data to opt out.
+  --skip-synthetic-data       Skip the tel-synthetic-data layer entirely
+                              (infra-only deploy). No prompt.
+  --yes, --non-interactive    Never block on an interactive prompt. With no
+                              --user-phone, proceeds with the anonymous-only
+                              seed (Locations + Menu) instead of asking. Use
+                              in CI or any piped/non-TTY run.
+  --synth-location "<where>"  City / zip / address / "lat,lon" used as the
+                              Amazon Location Service Geo Places search
+                              anchor. Defaults to "Dallas, Texas".
   --synth-business-name "<query>"
                               Business search term passed verbatim to
                               Amazon Location Service Geo Places (e.g.
                               "burgers", "pizza", "tacos", "Burger
-                              Restaurants"). Determines what real-
-                              world locations get pulled into the synthetic
+                              Restaurants"). Determines what real-world
+                              locations get pulled into the synthetic
                               Locations table. Does NOT affect the agent's
                               system prompt — pass --company-name for that.
-                              Required in --with-synthetic-data unattended
-                              mode.
+                              Defaults to "Burger Restaurants".
   --help                      Show this help.
 
 Prerequisites:
@@ -255,9 +286,42 @@ safe_npm_install() {
   fi
 
   echo "$output" | tail -1
+
+  # Guard against the aws-cdk CLI being too old to read the aws-cdk-lib
+  # cloud-assembly schema (the skew that silently broke the gateway layer:
+  # an exact-pinned old CLI vs a caret lib that npm floated forward). We
+  # only check in CDK app dirs (those that actually depend on aws-cdk-lib).
+  assert_cdk_cli_compatible
 }
 
-# Helper: extract JSON value from file — json_val <file> <stack> <key> [default]
+# Fail fast if the locally-resolved aws-cdk CLI cannot read the resolved
+# aws-cdk-lib's cloud-assembly schema. aws-cdk (CLI) and aws-cdk-lib use
+# DIFFERENT version-number lines (CLI 2.1125.x vs lib 2.257.x), so a naive
+# minor-number comparison is meaningless. The authoritative signal is the
+# cloud-assembly schema: `cdk --version` succeeds regardless, but any real
+# command emits "Cloud assembly schema version mismatch" when the CLI is
+# too old. We probe with a cheap `cdk ls` (lists stacks, triggers a synth
+# of the manifest) and detect that exact error so the operator gets an
+# actionable message instead of a cryptic mid-deploy failure.
+assert_cdk_cli_compatible() {
+  [ -f node_modules/aws-cdk-lib/package.json ] || return 0   # not a CDK app dir
+
+  local probe
+  set +e
+  probe=$(npx cdk ls 2>&1)
+  set -e
+  if echo "$probe" | grep -q "Cloud assembly schema version mismatch"; then
+    local lib_ver cli_ver
+    lib_ver=$(node -p "require('./node_modules/aws-cdk-lib/package.json').version" 2>/dev/null || echo "?")
+    cli_ver=$(npx cdk --version 2>/dev/null | awk '{print $1}' || echo "?")
+    print_error "aws-cdk CLI ($cli_ver) cannot read aws-cdk-lib ($lib_ver) cloud-assembly schema in $(pwd)."
+    print_error "cdk synth/deploy WILL fail with a schema-version mismatch."
+    print_info  "Fix: bump \"aws-cdk\" to track \"aws-cdk-lib\" in this dir's package.json (matching caret"
+    print_info  "ranges, e.g. aws-cdk ^2.1125.0 with aws-cdk-lib ^2.257.0), then re-run npm install."
+    exit 1
+  fi
+}
+
 json_val() {
   local file=$1 stack=$2 key=$3 default=${4:-}
   node -e "const d=JSON.parse(require('fs').readFileSync('$file','utf8')); console.log((d['$stack']||{})['$key']||'$default')"
@@ -1038,43 +1102,63 @@ fi
 # Runs AFTER tel-agent-runtime so the pepper SSM parameter exists.
 ################################################################################
 
-print_section "Layer 11: tel-synthetic-data (optional)"
+print_section "Layer 11: tel-synthetic-data (seeded by default)"
 
+# Seeding decision. Synthetic data is ON BY DEFAULT — the demo is hollow
+# without Locations + Menu rows. The only ways to skip are an explicit
+# --skip-synthetic-data, or an --only <other-layer> run.
 SHOULD_SEED=false
 
 if [ -n "$ONLY_COMPONENT" ] && [ "$ONLY_COMPONENT" != "tel-synthetic-data" ]; then
   print_info "tel-synthetic-data skipped (--only $ONLY_COMPONENT)"
 elif [ "$SKIP_SYNTHETIC_DATA" = true ]; then
   print_info "tel-synthetic-data skipped (--skip-synthetic-data)"
-elif [ "$WITH_SYNTHETIC_DATA" = true ]; then
-  SHOULD_SEED=true
-elif [ -n "$ONLY_COMPONENT" ] && [ "$ONLY_COMPONENT" = "tel-synthetic-data" ]; then
-  SHOULD_SEED=true
-elif [ -t 0 ]; then
-  # Interactive shell — prompt operator.
-  print_info "Seed the DynamoDB tables with synthetic Locations / Customers / Menu / Orders?"
-  print_info "(You can re-run this step later with: ./scripts/deploy-all.sh --only tel-synthetic-data ...)"
-  read -r -p "Seed synthetic data now? (Y/n): " ANSWER
-  if [[ "$ANSWER" =~ ^[Yy]([Ee][Ss])?$ ]] || [ -z "$ANSWER" ]; then
-    SHOULD_SEED=true
-  fi
 else
-  print_info "Non-interactive shell; neither --with-synthetic-data nor --skip-synthetic-data set. Skipping."
+  # Default-on: --with-synthetic-data, --only tel-synthetic-data, a bare
+  # deploy, an interactive deploy — all seed.
+  SHOULD_SEED=true
 fi
 
 if [ "$SHOULD_SEED" = true ]; then
-  # Validate the two required flags NOW so we fail fast before npm install.
-  if [ -z "$USER_NAME" ]; then
-    print_error "--user-name is required when seeding synthetic data"
-    exit 2
-  fi
+  # Apply defaults for any omitted flag so a bare deploy still produces a
+  # working demo. --user-phone has NO default (see the synthetic-data
+  # options comment near the top of this script).
+  SEED_USER_NAME="${USER_NAME:-$DEFAULT_USER_NAME}"
+  SEED_SYNTH_LOCATION="${SYNTH_LOCATION:-$DEFAULT_SYNTH_LOCATION}"
+  SEED_SYNTH_BUSINESS_NAME="${SYNTH_BUSINESS_NAME:-$DEFAULT_SYNTH_BUSINESS_NAME}"
+  SEED_COMPANY_NAME="${COMPANY_NAME:-$DEFAULT_COMPANY_NAME}"
+
+  # Loyalty caller identity. --user-phone is the only flag with no safe
+  # default. When it is absent we seed Locations + Menu only (anonymous
+  # demo works end-to-end); the loyalty Customer + Orders are skipped.
+  SEED_LOYALTY=true
   if [ -z "$USER_PHONE" ]; then
-    print_error "--user-phone is required when seeding synthetic data (E.164, e.g. +12125550100)"
-    exit 2
-  fi
-  if ! [[ "$USER_PHONE" =~ ^\+[1-9][0-9]{1,14}$ ]]; then
-    print_error "--user-phone must be E.164 format (got: $USER_PHONE)"
-    exit 2
+    SEED_LOYALTY=false
+    if [ "$ASSUME_YES" != true ] && [ -t 0 ]; then
+      # Genuine interactive operator who did not pass --yes: let them
+      # confirm the anonymous-only path. Any non-TTY context (CI, a
+      # `| tee` pipeline, this being piped) or an explicit --yes skips
+      # the prompt and proceeds with the safe default — never hang.
+      print_warning "No --user-phone provided."
+      print_info    "Without it the demo seeds Locations + Menu only — anonymous callers"
+      print_info    "can order, but there is no loyalty caller identification. You can add"
+      print_info    "the loyalty caller later with:"
+      print_info    "  ./scripts/deploy-all.sh --only tel-synthetic-data --user-phone +1..."
+      read -r -p "Continue WITHOUT loyalty identification? (Y/n): " ANSWER
+      if ! { [[ "$ANSWER" =~ ^[Yy]([Ee][Ss])?$ ]] || [ -z "$ANSWER" ]; }; then
+        print_error "Aborted by operator. Re-run with --user-phone +1... to seed the loyalty caller."
+        exit 2
+      fi
+    else
+      print_warning "No --user-phone provided; seeding Locations + Menu only (no loyalty caller)."
+      print_info    "Add the loyalty caller later with: ./scripts/deploy-all.sh --only tel-synthetic-data --user-phone +1..."
+    fi
+  else
+    # Phone supplied — validate E.164 before doing any work.
+    if ! [[ "$USER_PHONE" =~ ^\+[1-9][0-9]{1,14}$ ]]; then
+      print_error "--user-phone must be E.164 format (got: $USER_PHONE)"
+      exit 2
+    fi
   fi
 
   DATA_ALREADY_SEEDED=$(is_deployed "tel-synthetic-data")
@@ -1094,27 +1178,22 @@ if [ "$SHOULD_SEED" = true ]; then
         node cleanup-data.js --force
       fi
 
-      # Build the node populate-data.js command. Non-interactive if either
-      # --with-synthetic-data was passed AND --synth-location +
-      # --synth-business-name were both supplied; interactive otherwise.
+      # Build the populate-data.js command. deploy-all.sh owns all prompting
+      # now, so we always pass --non-interactive plus the resolved location
+      # + business defaults. --user-phone is passed ONLY when supplied; its
+      # absence makes populate-data.js seed Locations + Menu without the
+      # loyalty Customer + Orders.
       NODE_ARGS=(
         populate-data.js
-        --user-name "$USER_NAME"
-        --user-phone "$USER_PHONE"
+        --user-name "$SEED_USER_NAME"
         --deployment-prefix "$PROJECT_PREFIX"
+        --company-name "$SEED_COMPANY_NAME"
+        --location "$SEED_SYNTH_LOCATION"
+        --business-name "$SEED_SYNTH_BUSINESS_NAME"
+        --non-interactive
       )
-      if [ -n "$COMPANY_NAME" ]; then
-        NODE_ARGS+=(--company-name "$COMPANY_NAME")
-      fi
-      if [ -n "$SYNTH_LOCATION" ] && [ -n "$SYNTH_BUSINESS_NAME" ]; then
-        NODE_ARGS+=(
-          --location "$SYNTH_LOCATION"
-          --business-name "$SYNTH_BUSINESS_NAME"
-          --non-interactive
-        )
-      elif [ "$WITH_SYNTHETIC_DATA" = true ] && [ ! -t 0 ]; then
-        print_error "--with-synthetic-data in a non-TTY shell requires --synth-location + --synth-business-name"
-        exit 2
+      if [ "$SEED_LOYALTY" = true ]; then
+        NODE_ARGS+=(--user-phone "$USER_PHONE")
       fi
 
       node "${NODE_ARGS[@]}"

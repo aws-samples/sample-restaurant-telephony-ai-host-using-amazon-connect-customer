@@ -162,7 +162,17 @@ cd sample-restaurant-telephony-ai-host-using-amazon-bedrock-agentcore-nova-sonic
 - `--company-name "<brand>"` — Brand identity for the deployment. (1) Rebrands every synthetic-data location's display name to this value, and (2) substitutes `{BUSINESS_NAME}` in the Telephony agent's system prompt at AWS CDK synth time so the agent greets callers as this brand. Defaults to `Amazing Burgers` when omitted.
 - `--synth-business-name "<query>"` — Business search term passed verbatim to Amazon Location Service Geo Places (for example, `burgers`, `pizza`, `tacos`, or `Burger Restaurants`). Determines what real-world locations get pulled into the synthetic Locations table. Does not affect the agent's system prompt.
 - `--synth-location "<where>"` — City, ZIP code, address, or `"lat,lon"` pair used as the search anchor for Amazon Location Service Geo Places.
-- `--with-synthetic-data --user-name "Jane Doe" --user-phone "+12125550100" --synth-location "Dallas, Texas" --synth-business-name "Burger Restaurants" --company-name "My Awesome Restaurant"` — Seed Amazon DynamoDB with a sample customer, locations, menu items, and orders for end-to-end testing.
+- `--with-synthetic-data --user-name "Jane Doe" --user-phone "+12125550100" --synth-location "Dallas, Texas" --synth-business-name "Burger Restaurants" --company-name "My Awesome Restaurant"` — Synthetic data is seeded **by default**; this flag is an explicit opt-in kept for backward compatibility. The example shows every synthetic-data flag together.
+- `--skip-synthetic-data` — Opt out of seeding entirely for an infrastructure-only deploy.
+
+**Synthetic data is seeded by default.** A bare `./scripts/deploy-all.sh --deploymentPrefix qsr-tel` populates Amazon DynamoDB with real-world locations, a generated menu, and (when `--user-phone` is supplied) a loyalty customer with order history — because the demo is hollow without it. When a flag is omitted, these defaults apply: `--user-name "Jane Doe"`, `--synth-location "Dallas, Texas"`, `--synth-business-name "Burger Restaurants"`, `--company-name "Amazing Burgers"`.
+
+`--user-phone` has no default — it is the real number you dial from to test the loyalty greeting. If you omit it, the deploy seeds locations and menu only (anonymous callers can still order end-to-end) and skips the loyalty customer; an interactive run asks you to confirm this anonymous-only path. Add the loyalty caller later without redeploying the infrastructure:
+
+```bash
+./scripts/deploy-all.sh --only tel-synthetic-data \
+  --user-name "Jane Doe" --user-phone "+12125550100"
+```
 
 **Demo rebrand pattern:** The brand you are demoing for may not have enough real locations near your test region for Amazon Location Service Geo Places to return useful results. To work around this, broaden `--synth-business-name` to a search term that returns plenty of locations, then set `--company-name` to the brand you want the agent to present. Every seeded location is rebranded to `--company-name`, and the agent greets callers as that brand. For example, `--synth-business-name "Burger Restaurants" --company-name "My Awesome Restaurant"` populates the Locations table from a wide burger search around `--synth-location` while keeping the agent on-brand for the demo.
 

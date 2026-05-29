@@ -233,10 +233,15 @@ async function ingestData(dynamodb, tableNames, data) {
 
   const datasets = [
     { label: `${data.locations.length} locations`, table: tableNames.locations, items: data.locations },
-    { label: 'customer profile', table: tableNames.customers, items: [data.customer] },
     { label: `${data.menu.length} menu items`, table: tableNames.menu, items: data.menu },
-    { label: `${data.orders.length} orders`, table: tableNames.orders, items: data.orders },
   ];
+  // Customer + orders only when a loyalty customer was generated.
+  if (data.customer) {
+    datasets.push({ label: 'customer profile', table: tableNames.customers, items: [data.customer] });
+  }
+  if (Array.isArray(data.orders) && data.orders.length > 0) {
+    datasets.push({ label: `${data.orders.length} orders`, table: tableNames.orders, items: data.orders });
+  }
 
   for (const { label, table, items } of datasets) {
     info(`Writing ${label} -> ${table}...`);
@@ -256,12 +261,26 @@ async function main() {
 
   header('Telephony Voice Ordering Agent - Synthetic Data');
 
-  // -- Validate CLI args that must be present in every mode --------------
-  const { isValid: nameOk, error: nameErr } = validateUserName(args.userName);
-  if (!nameOk) { fail(`--user-name: ${nameErr}`); return 2; }
+  // -- Decide whether we seed a loyalty customer -------------------------
+  // --user-phone is the loyalty caller's identity. When it is omitted we
+  // still seed Locations + Menu (so anonymous callers get a working demo)
+  // but skip the Customer + Orders rows. A later run that supplies
+  // --user-phone adds the loyalty data on top.
+  const seedLoyalty = Boolean((args.userPhone || '').trim());
 
-  const { isValid: phoneOk, error: phoneErr, phone: e164 } = validateE164Phone(args.userPhone);
-  if (!phoneOk) { fail(`--user-phone: ${phoneErr}`); return 2; }
+  let e164 = '';
+  if (seedLoyalty) {
+    // Validate the loyalty-customer args only when we are seeding loyalty.
+    const { isValid: nameOk, error: nameErr } = validateUserName(args.userName);
+    if (!nameOk) { fail(`--user-name: ${nameErr}`); return 2; }
+
+    const { isValid: phoneOk, error: phoneErr, phone } = validateE164Phone(args.userPhone);
+    if (!phoneOk) { fail(`--user-phone: ${phoneErr}`); return 2; }
+    e164 = phone;
+  } else {
+    warn('No --user-phone provided: seeding Locations + Menu only (no loyalty customer).');
+    info('Re-run later with --user-phone +1... to add the loyalty caller and order history.');
+  }
 
   // -- Table names --------------------------------------------------------
   const workspaceRoot = path.resolve(__dirname, '..', '..');
@@ -269,24 +288,28 @@ async function main() {
   if (!tableNames) return 1;
   ok(`Tables resolved from cdk-outputs/tel-ddb.json`);
 
-  // -- Pepper -------------------------------------------------------------
-  const pepperPath = `/${args.deploymentPrefix}/customer-id-pepper`;
-  info(`Reading pepper from SSM: ${pepperPath}`);
-  let pepper;
-  try {
-    pepper = await loadPepper(pepperPath);
-  } catch (err) {
-    fail(`Failed to read SSM pepper: ${err.message}`);
-    info('Check that tel-agent-runtime has been deployed (the runtime stack provisions this SecureString).');
-    return 1;
-  }
-  ok(`Pepper loaded (length=${pepper.length} bytes)`);
+  // -- Pepper + customerId (loyalty path only) ---------------------------
+  let customerId = '';
+  let email = '';
+  if (seedLoyalty) {
+    const pepperPath = `/${args.deploymentPrefix}/customer-id-pepper`;
+    info(`Reading pepper from SSM: ${pepperPath}`);
+    let pepper;
+    try {
+      pepper = await loadPepper(pepperPath);
+    } catch (err) {
+      fail(`Failed to read SSM pepper: ${err.message}`);
+      info('Check that tel-agent-runtime has been deployed (the runtime stack provisions this SecureString).');
+      return 1;
+    }
+    ok(`Pepper loaded (length=${pepper.length} bytes)`);
 
-  // -- Derive customer_id the way the agent will at call time -------------
-  const customerId = computeCustomerId(e164, pepper);
-  const email = `${slugifyName(args.userName)}@example.com`;
-  ok(`customerId = ${customerId}`);
-  info(`Synthetic email = ${email} (for Customers.email schema parity)`);
+    // -- Derive customer_id the way the agent will at call time -----------
+    customerId = computeCustomerId(e164, pepper);
+    email = `${slugifyName(args.userName)}@example.com`;
+    ok(`customerId = ${customerId}`);
+    info(`Synthetic email = ${email} (for Customers.email schema parity)`);
+  }
 
   // -- User location + business search -----------------------------------
   header('Step 1: Location input');
@@ -340,31 +363,42 @@ async function main() {
   });
   ok(`Generated ${locations.length} Location records`);
 
-  const customerData = generateCustomerData(
-    customerId,
-    args.userName,
-    e164,
-    email,
-    homeLocation.address,
-    [homeLocation.lat, homeLocation.lon],
-  );
-  ok(`Generated Customer ${args.userName} (${customerId}, phone ${e164})`);
-
   const menuItems = locations.flatMap((loc) => generateMenuItems(loc.locationId));
   ok(`Generated ${menuItems.length} Menu items (${Math.floor(menuItems.length / locations.length)} per location)`);
 
-  const nearbyLocations = locations.filter((l) => (l.distance_meters || 0) < 16093); // 10 miles
-  const ordersLocations = nearbyLocations.length ? nearbyLocations : locations.slice(0, 3);
-  const orders = generateOrders(customerId, ordersLocations, 5);
-  ok(`Generated ${orders.length} sample Orders`);
+  // Loyalty customer + order history are only generated when a phone was
+  // supplied (seedLoyalty). Otherwise we ship Locations + Menu alone so
+  // anonymous callers get a working demo.
+  let customerData = null;
+  let orders = [];
+  if (seedLoyalty) {
+    customerData = generateCustomerData(
+      customerId,
+      args.userName,
+      e164,
+      email,
+      homeLocation.address,
+      [homeLocation.lat, homeLocation.lon],
+    );
+    ok(`Generated Customer ${args.userName} (${customerId}, phone ${e164})`);
+
+    const nearbyLocations = locations.filter((l) => (l.distance_meters || 0) < 16093); // 10 miles
+    const ordersLocations = nearbyLocations.length ? nearbyLocations : locations.slice(0, 3);
+    orders = generateOrders(customerId, ordersLocations, 5);
+    ok(`Generated ${orders.length} sample Orders`);
+  } else {
+    info('Skipping Customer + Orders generation (no --user-phone).');
+  }
 
   // -- Save local JSON ---------------------------------------------------
   header('Step 5: Local JSON snapshot');
   const outputDir = path.join(__dirname, 'output');
   saveToJson(locations, 'locations.json', outputDir);
-  saveToJson([customerData], 'customer.json', outputDir);
   saveToJson(menuItems, 'menu.json', outputDir);
-  saveToJson(orders, 'orders.json', outputDir);
+  if (seedLoyalty) {
+    saveToJson([customerData], 'customer.json', outputDir);
+    saveToJson(orders, 'orders.json', outputDir);
+  }
 
   // -- Ingest ------------------------------------------------------------
   if (!args.nonInteractive) {
@@ -378,10 +412,16 @@ async function main() {
   await ingestData(dynamodb, tableNames, { locations, customer: customerData, menu: menuItems, orders });
 
   header('Complete');
-  ok(`Seeded ${locations.length} locations, 1 customer, ${menuItems.length} menu items, ${orders.length} orders`);
-  info(`Test caller identity: ${args.userName} <${email}> ${e164}`);
-  info(`Customers PK: CUSTOMER#${customerId}`);
-  info('Dial the telephony agent from this number to test the loyalty greeting path.');
+  if (seedLoyalty) {
+    ok(`Seeded ${locations.length} locations, 1 customer, ${menuItems.length} menu items, ${orders.length} orders`);
+    info(`Test caller identity: ${args.userName} <${email}> ${e164}`);
+    info(`Customers PK: CUSTOMER#${customerId}`);
+    info('Dial the telephony agent from this number to test the loyalty greeting path.');
+  } else {
+    ok(`Seeded ${locations.length} locations, ${menuItems.length} menu items (no loyalty customer)`);
+    info('Anonymous callers can order end-to-end. To add a loyalty caller later, re-run:');
+    info('  ./scripts/deploy-all.sh --only tel-synthetic-data --user-name "Jane Doe" --user-phone +1...');
+  }
 
   closeRl();
   return 0;

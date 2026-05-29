@@ -149,27 +149,37 @@ print_info()    { echo -e "${BLUE}ℹ️  $1${NC}"; }
 safe_npm_install() {
   local current_dir
   current_dir=$(pwd)
-  local project_dirs=(
-    "backend/backend-infrastructure"
-    "backend/agentcore-gateway/cdk"
-    "backend/network"
-    "backend/agentcore-runtime-telephony/cdk/ecr"
-    "backend/agentcore-runtime-telephony/cdk/build"
-    "backend/agentcore-runtime-telephony/cdk/runtime"
-    "telephony-interface/telephony-sip-gateway/cdk"
-    "telephony-interface/telephony-number/cdk"
-    "telephony-interface/telephony-ingress/cdk"
-  )
-  for dir in "${project_dirs[@]}"; do
-    local abs_dir="$WORKSPACE_ROOT/$dir"
-    if [ "$abs_dir" != "$current_dir" ] && [ -d "$abs_dir/node_modules" ]; then
-      rm -rf "$abs_dir/node_modules"
-    fi
-  done
 
-  if [ ! -d "node_modules" ]; then
-    print_info "Installing dependencies..."
-    npm install --no-fund --no-audit > /dev/null 2>&1 || true
+  # During teardown we do NOT wipe sibling node_modules (the deploy script's
+  # low-storage trick). Wiping siblings here was the root cause of the
+  # "Cannot find module 'aws-cdk-lib'" destroy failures: a later destroy
+  # step would find its modules already deleted by an earlier step, and the
+  # conditional install below skipped reinstalling when the dir looked
+  # partially present. Teardown touches each dir once; just ensure deps
+  # exist and FAIL LOUDLY if the install errors (destroy cannot synth
+  # without them).
+  if [ ! -d "node_modules" ] || [ ! -d "node_modules/aws-cdk-lib" ]; then
+    print_info "Installing dependencies in $(basename "$current_dir")..."
+    if ! npm install --no-fund --no-audit > /dev/null 2>&1; then
+      print_error "npm install failed in $current_dir — cdk destroy cannot synthesize without dependencies."
+      print_info  "Re-run: (cd $current_dir && npm install) then re-run cleanup-all.sh"
+      return 1
+    fi
+  fi
+
+  # Guard against an aws-cdk CLI too old to read the aws-cdk-lib schema —
+  # `cdk destroy` synthesizes first, so the same skew that breaks deploy
+  # breaks destroy. aws-cdk and aws-cdk-lib use different version lines, so
+  # we detect the skew authoritatively via CDK's own schema check (a cheap
+  # `cdk ls`) rather than comparing version numbers. On skew we flip
+  # USE_NPX_LATEST_CDK so destroy_stack pulls a current CLI via npx.
+  if [ -f node_modules/aws-cdk-lib/package.json ]; then
+    local probe
+    probe=$(npx cdk ls 2>&1 || true)
+    if echo "$probe" | grep -q "Cloud assembly schema version mismatch"; then
+      print_warning "aws-cdk CLI too old for aws-cdk-lib in $(basename "$current_dir"); destroy will use npx cdk@latest."
+      USE_NPX_LATEST_CDK=true
+    fi
   fi
 }
 
@@ -280,9 +290,18 @@ destroy_stack() {
   (
     set -e
     cd "$WORKSPACE_ROOT/$cdk_dir"
+    USE_NPX_LATEST_CDK=false
     safe_npm_install
+    # When safe_npm_install detected a CLI/lib skew (local CLI too old to
+    # read the lib schema), pull a current CLI via npx so destroy can still
+    # synthesize. --yes auto-accepts the npx package install so it never
+    # hangs on an interactive "Ok to proceed?" prompt in a background run.
     # shellcheck disable=SC2086
-    npx cdk destroy $destroy_flags $extra_flags "$stack_id"
+    if [ "${USE_NPX_LATEST_CDK:-false}" = true ]; then
+      npx --yes cdk@latest destroy $destroy_flags $extra_flags "$stack_id"
+    else
+      npx cdk destroy $destroy_flags $extra_flags "$stack_id"
+    fi
   )
   local ec=$?
   if [ $ec -eq 0 ]; then
