@@ -395,6 +395,7 @@ Open the [AWS CloudFormation console](https://console.aws.amazon.com/cloudformat
 - **No device GPS.** The agent asks the caller for a ZIP code or cross-street and uses Amazon Location Service for geocoding.
 - **One call, one Amazon Bedrock AgentCore Runtime session.** Each call runs to completion in its own session; there is no cross-call state on the runtime.
 - **Single Region.** The Guidance deploys into one AWS Region. Cross-Region failover is documented under Next Steps and is not provided out of the box.
+- **US Toll Free Phone Number.** The Guidance deploys with a US Toll-Free Phone Number.
 
 For feedback, questions, or suggestions, open an issue in the repository.
 
