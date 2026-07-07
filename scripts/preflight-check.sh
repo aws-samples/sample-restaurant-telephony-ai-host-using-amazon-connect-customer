@@ -8,7 +8,7 @@
 #   - git present
 #   - AWS credentials reachable (only when aws CLI present)
 #   - CDK bootstrap >= v6 in the current region; auto-offer to fix
-#   - Bedrock Nova 2 Sonic model access granted (warn-only if missing)
+#   - Bedrock Nova 2 Sonic model access granted (warn-only if missing) 
 #   - NFR4 assertion: python/pip/poetry/uv/etc. are NOT required at the dev layer.
 #
 # Exits 0 on success. Exits 1 on any hard failure (unfixed bootstrap counts).
