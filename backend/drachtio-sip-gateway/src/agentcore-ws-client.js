@@ -116,9 +116,16 @@ class AgentCoreWebSocketClient {
       session_id: this.sessionId,
     });
 
+    // handshakeTimeout margin: on a fully-cold runtime the SMA warmup's
+    // microVM can take ~13-15s to finish booting and accept the /ws
+    // upgrade. 10s used to clip that window and surface as
+    // "Opening handshake has timed out" on the first call after idle.
+    // 18s gives the cold microVM room to come up while staying under
+    // Chime's CallAndBridge CallTimeoutSeconds (20s) so we never leave
+    // the caller hanging past the bridge-answer budget.
     this.ws = new WebSocket(wssUrl, {
       perMessageDeflate: false,
-      handshakeTimeout: 10_000,
+      handshakeTimeout: 18_000,
     });
 
     this.ws.on('open', () => {

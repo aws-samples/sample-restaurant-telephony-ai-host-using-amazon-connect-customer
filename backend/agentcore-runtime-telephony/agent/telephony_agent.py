@@ -73,6 +73,7 @@ import base64
 import json
 import logging
 import os
+import time
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -209,9 +210,50 @@ class WarmSession:
     resolved_prompt: str
     mcp_client: MCPClient
     agent: BidiAgent
+    # time.monotonic() at build completion. Used to expire stale warm
+    # sessions whose Nova Sonic stream has idle-timed-out (see _WARM_TTL_S).
+    created_at: float = 0.0
 
 
 _warm_sessions: Dict[str, WarmSession] = {}
+
+# Sessions whose warm build is currently running, keyed by session id.
+# Lets the idempotent /invocations warmup (the SMA ring-and-poll loop)
+# tell "still building" (202) apart from "not started yet" without ever
+# kicking off a second concurrent build for the same session — a repeat
+# build would open a second Nova Sonic stream and orphan the first.
+_warm_building: Dict[str, "asyncio.Task[None]"] = {}
+
+# A warm session primes Nova Sonic at build time, which starts the
+# server-side ~55s idle timeout. If no /ws attaches within that window
+# the bidi stream is torn down server-side and the cached "ready"
+# session is a corpse — attaching to it yields a 532 "timed out waiting
+# for audio" and the bridge drops the call. So we treat any warm session
+# older than _WARM_TTL_S as stale: /invocations rebuilds it instead of
+# reporting ready, and /ws rebuilds (preserving caller identity) rather
+# than attaching. Kept safely under the 55s server limit.
+_WARM_TTL_S = 40.0
+
+
+def _warm_is_fresh(warm: "WarmSession") -> bool:
+    """True while the warm session's Nova Sonic stream should still be alive."""
+    return (time.monotonic() - warm.created_at) < _WARM_TTL_S
+
+
+async def _close_warm_quietly(warm: "WarmSession") -> None:
+    """Best-effort teardown of a discarded (stale) warm session.
+
+    Mirrors the /ws finally cleanup (agent.stop -> mcp_client.__exit__) so
+    a rebuilt-over stale session doesn't leak its MCP client / model stream.
+    """
+    try:
+        await warm.agent.stop()
+    except Exception:
+        pass
+    try:
+        warm.mcp_client.__exit__(None, None, None)
+    except Exception:
+        pass
 
 
 async def _build_call_context(session: Session, voice_id: str) -> WarmSession:
@@ -310,7 +352,37 @@ async def _build_call_context(session: Session, voice_id: str) -> WarmSession:
         resolved_prompt=resolved_prompt,
         mcp_client=mcp_client,
         agent=agent,
+        created_at=time.monotonic(),
     )
+
+
+async def _warm_build_and_store(session_id: str, session: Session, voice_id: str) -> None:
+    """Background task: build the call context and stash it warm.
+
+    Runs the expensive `_build_call_context` OFF the request path so the
+    warmup POST returns immediately (202) while the caller keeps ringing.
+    Populates `_warm_sessions` on success; always clears the in-flight
+    marker in `_warm_building` when done (success or failure) so a later
+    poll can retry a failed build.
+    """
+    try:
+        warm = await _build_call_context(session, voice_id)
+        _warm_sessions[session_id] = warm
+        logger.info(
+            "warm session ready",
+            extra={
+                "session_id": session_id,
+                "call_id": session.call_id,
+                "warm_cache_size": len(_warm_sessions),
+            },
+        )
+    except Exception:
+        logger.exception(
+            "warmup build failed",
+            extra={"session_id": session_id, "call_id": session.call_id},
+        )
+    finally:
+        _warm_building.pop(session_id, None)
 
 
 # ───────────── FastAPI app ─────────────
@@ -351,11 +423,18 @@ async def invocations(request: Request) -> JSONResponse:
     body shape `{"type":"warmup", "raw_from":..., "anonymous":...,
     "from_last4":..., "call_id":...}`. The session ID arrives in the
     `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header and pins this
-    request to a specific microVM. We do all the expensive call setup
-    (prompt render, Nova Sonic stream open, MCP tool discovery,
-    BidiAgent.start, prime with "Hi") right here, then stash the
-    result in `_warm_sessions[session_id]` so the bridge's later
-    `/ws` connection on the same session ID can attach in O(ms).
+    request to a specific microVM. The expensive call setup (prompt
+    render, Nova Sonic stream open, MCP tool discovery, BidiAgent.start,
+    prime with "Hi") runs in a BACKGROUND task; this handler returns
+    immediately so the SMA's ring-and-poll loop is never blocked. The
+    result is stashed in `_warm_sessions[session_id]` so the bridge's
+    later `/ws` connection on the same session ID attaches in O(ms).
+
+    The handler is idempotent and doubles as the SMA's readiness probe:
+    it returns 200 {"status":"ready"} once the warm session exists, and
+    202 {"status":"warming"} while the background build is still running
+    (or has just been started). It never launches a second build for a
+    session id that is already warm or in flight.
 
     Future: any non-warmup invocation type returns 400. We deliberately
     do not implement a generic POST agent here — the WebSocket is the
@@ -423,28 +502,43 @@ async def invocations(request: Request) -> JSONResponse:
         },
     )
 
-    try:
-        warm = await _build_call_context(session, voice_id)
-    except Exception:
-        logger.exception(
-            "warmup build_call_context failed",
-            extra={"call_id": call_id, "session_id": session_id},
+    # Idempotent, non-blocking warmup for the SMA ring-and-poll loop.
+    # The SMA polls this endpoint repeatedly while the caller rings, so we
+    # must (a) never build the same session twice and (b) return fast with
+    # a readiness signal instead of blocking for the whole cold build.
+    # Contract the SMA relies on:
+    #   200 {"status":"ready"}   -> warm session built; SMA issues CallAndBridge.
+    #   202 {"status":"warming"} -> build in flight; SMA keeps the caller ringing.
+    cached = _warm_sessions.get(session_id)
+    if cached is not None:
+        if _warm_is_fresh(cached):
+            return JSONResponse({"status": "ready", "call_id": call_id})
+        # Stale — the Nova Sonic stream has (or is about to) idle-time-out
+        # with no /ws attached. Discard it and rebuild below so we never
+        # report a dead session as ready.
+        _warm_sessions.pop(session_id, None)
+        logger.info(
+            "discarding stale warm session",
+            extra={"session_id": session_id, "call_id": call_id},
         )
-        return JSONResponse(
-            {"error": "warmup_failed", "call_id": call_id},
-            status_code=500,
+        asyncio.create_task(
+            _close_warm_quietly(cached),
+            name=f"close-stale-{call_id or session_id[:12]}",
         )
 
-    _warm_sessions[session_id] = warm
-    logger.info(
-        "warm session ready",
-        extra={
-            "session_id": session_id,
-            "call_id": call_id,
-            "warm_cache_size": len(_warm_sessions),
-        },
+    existing = _warm_building.get(session_id)
+    if existing is not None and not existing.done():
+        return JSONResponse({"status": "warming", "call_id": call_id}, status_code=202)
+
+    # Nothing in flight (never started, or a previous build finished/failed
+    # without populating the cache) -> kick off a fresh background build and
+    # return immediately so the caller keeps ringing.
+    task = asyncio.create_task(
+        _warm_build_and_store(session_id, session, voice_id),
+        name=f"warmbuild-{call_id or session.customer_id}",
     )
-    return JSONResponse({"status": "warmed", "call_id": call_id})
+    _warm_building[session_id] = task
+    return JSONResponse({"status": "warming", "call_id": call_id}, status_code=202)
 
 
 @app.websocket("/ws")
@@ -495,7 +589,28 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         # ───── Pre-warm cache lookup ─────
         if session_id:
             warm = _warm_sessions.pop(session_id, None)
-            if warm is not None:
+            if warm is not None and not _warm_is_fresh(warm):
+                # Popped a STALE warm session — its Nova Sonic stream has
+                # idle-timed-out (built long ago, no /ws until now). Attaching
+                # would 532 and drop the call. Rebuild fresh, PRESERVING the
+                # caller identity + voice so we don't demote a loyalty caller
+                # to anonymous.
+                logger.warning(
+                    "ws popped stale warm session; rebuilding fresh",
+                    extra={
+                        "session_id": session_id,
+                        "call_id": warm.session.call_id,
+                        "customer_id": warm.session.customer_id,
+                    },
+                )
+                stale_session = warm.session
+                stale_voice = warm.voice_id
+                await _close_warm_quietly(warm)
+                warm = await _build_call_context(stale_session, stale_voice)
+                session = warm.session
+                agent = warm.agent
+                mcp_client = warm.mcp_client
+            elif warm is not None:
                 logger.info(
                     "ws attached to warm session",
                     extra={

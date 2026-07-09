@@ -95,6 +95,24 @@ const AGENT_VOICE_ID = process.env.AGENT_VOICE_ID ?? 'tiffany';
  */
 const CALL_BRIDGE_TIMEOUT_SECONDS = 20;
 
+/**
+ * Ring-and-poll tuning (cold-start masking).
+ *
+ * AgentCore Runtime scale-from-zero can take ~20-25s (host provisioning +
+ * image pull), far longer than a single call-setup window. Rather than
+ * bridge into a not-yet-booted microVM (whose /ws upgrade fails with 424),
+ * we keep the caller ringing and re-probe the agent's idempotent warmup
+ * endpoint until it reports READY, then bridge.
+ *
+ * Chime hangs up a call if a single Lambda invocation doesn't respond within
+ * 20s, so each probe must return fast — we cap the probe abort well under
+ * that and drive the wait as a loop of short Pause actions (Chime allows up
+ * to 1,000 invocations per call).
+ */
+const RING_POLL_BUDGET_MS = 28_000; // max time to keep the caller ringing while warming
+const RING_POLL_PAUSE_MS = 2_000; // ring dwell between readiness probes (one invocation per dwell)
+const WARMUP_PROBE_TIMEOUT_MS = 3_500; // per-probe abort; keeps each invocation under Chime's 5s/20s limits
+
 // Reuse the SSM client across warm Lambda invocations.
 const ssm = new SSMClient({ region: REGION });
 
@@ -149,6 +167,7 @@ type ChimeParticipant = {
   Direction?: string;
   ParticipantTag?: string;
   Status?: string;
+  StartTimeInMilliseconds?: string;
 };
 
 type ChimeCallDetails = {
@@ -237,18 +256,126 @@ function logError(message: string, extra: Record<string, unknown>): void {
   console.error(JSON.stringify({ level: 'ERROR', message, ...extra }));
 }
 
-async function handleNewInboundCall(event: ChimeEvent): Promise<ChimeResponse> {
+/** Chime Pause action — delays the SMA WITHOUT answering the leg, so the
+ * caller keeps hearing normal carrier ringback while the agent warms. */
+function pauseAction(ms: number): ChimeAction {
+  return { Type: 'Pause', Parameters: { DurationInMilliseconds: String(ms) } };
+}
+
+/**
+ * Build the CallAndBridge action to the Voice Connector, optionally riding
+ * the deterministic session id forward on a SipHeaders.X-Session-Id header.
+ *
+ * SipHeaders is a top-level CallAndBridge parameter (sibling of Endpoints),
+ * NOT a property of the endpoint object — Chime silently drops it if nested.
+ * Custom names must start with X-. The SIP gateway reads X-Session-Id off the
+ * INVITE and feeds it to its AgentCore wss connection so the bridge attaches
+ * to the same warm microVM. Limits: ≤20 entries, value ≤2048 chars.
+ */
+function buildBridgeAction(vcArn: string, from: string, sessionId: string | null): ChimeAction {
+  const bridgeParams: Record<string, unknown> = {
+    CallTimeoutSeconds: CALL_BRIDGE_TIMEOUT_SECONDS,
+    CallerIdNumber: from,
+    Endpoints: [{ BridgeEndpointType: 'AWS', Arn: vcArn, Uri: from || 'agent' }],
+  };
+  if (sessionId) {
+    bridgeParams.SipHeaders = { 'X-Session-Id': sessionId };
+  }
+  return { Type: 'CallAndBridge', Parameters: bridgeParams };
+}
+
+/** Milliseconds the caller has been on the call so far (drives the ring budget). */
+function callElapsedMs(event: ChimeEvent): number {
+  const parts = event.CallDetails?.Participants ?? [];
+  const legA = parts.find((p) => p.ParticipantTag === 'LEG-A') ?? parts[0];
+  const start = Number(legA?.StartTimeInMilliseconds);
+  if (!Number.isFinite(start) || start <= 0) return 0;
+  return Math.max(0, Date.now() - start);
+}
+
+type WarmState = 'ready' | 'warming';
+
+/**
+ * Probe the agent's idempotent warmup endpoint. On the first tick this POST
+ * also boots the microVM (it's what allocates the session). Returns 'ready'
+ * ONLY on HTTP 200; every other outcome — 202 (build in flight), 424 (session
+ * not yet routable), or a client-side timeout while the microVM is still
+ * cold-booting — is 'warming', so the caller keeps ringing and we retry.
+ */
+async function probeWarmup(
+  sessionId: string,
+  from: string,
+  derived: { anonymous: boolean; fromLast4: string; customerId: string },
+  aLegCallId: string,
+  txId: string,
+): Promise<WarmState> {
+  const warmupBody = {
+    type: 'warmup',
+    raw_from: from,
+    anonymous: derived.anonymous,
+    from_last4: derived.fromLast4,
+    call_id: aLegCallId,
+    voice_id: AGENT_VOICE_ID,
+  };
+  const startedAt = Date.now();
+  try {
+    const result = await agentcoreWarmup.warmup({
+      runtimeArn: AGENT_RUNTIME_ARN,
+      region: REGION,
+      sessionId,
+      body: warmupBody,
+      timeoutMs: WARMUP_PROBE_TIMEOUT_MS,
+    });
+    const elapsedMs = Date.now() - startedAt;
+    if (result.status === 200) {
+      logInfo('warmup_ready', {
+        transactionId: txId,
+        fromLast4: derived.fromLast4,
+        customerId: derived.customerId,
+        elapsedMs,
+      });
+      return 'ready';
+    }
+    logInfo('warmup_warming', {
+      transactionId: txId,
+      fromLast4: derived.fromLast4,
+      status: result.status,
+      elapsedMs,
+    });
+    return 'warming';
+  } catch (err: unknown) {
+    // Timeout/abort while the microVM is still cold-booting, or transport
+    // error. Treated as 'warming' so the caller keeps ringing and we retry
+    // on the next tick.
+    logInfo('warmup_probe_pending', {
+      transactionId: txId,
+      fromLast4: derived.fromLast4,
+      elapsedMs: Date.now() - startedAt,
+      error: (err as Error)?.message ?? String(err),
+    });
+    return 'warming';
+  }
+}
+
+/**
+ * Ring-and-poll inbound handler.
+ *
+ * Runs on NEW_INBOUND_CALL and on each ACTION_SUCCESSFUL after a Pause. While
+ * the caller rings, we probe the AgentCore warmup endpoint (idempotent, and
+ * doubling as a readiness signal) and only issue CallAndBridge once the agent
+ * reports the warm session is READY. This keeps the caller in the normal
+ * ringing state during the AgentCore cold-start instead of bridging into a
+ * not-yet-booted microVM (whose /ws upgrade fails with 424 and drops the call).
+ *
+ * A hard ring budget bounds how long we ring; once exceeded we bridge anyway
+ * (best-effort) so we never ring forever. Anonymous callers (no deterministic
+ * session id) and the no-runtime-arn state bridge immediately, as before.
+ */
+async function handleInboundRingPoll(event: ChimeEvent): Promise<ChimeResponse> {
   const txId = extractTransactionId(event);
   const aLegCallId = findLegCallId(event, 'LEG-A');
   const from = findCallerFrom(event);
-  const sipApplicationId = event.CallDetails?.SipApplicationId ?? '';
-
-  logInfo('new_inbound_call', {
-    transactionId: txId,
-    fromLast4: lastFour(from),
-    sipApplicationId,
-    deploymentPrefix: DEPLOYMENT_PREFIX,
-  });
+  const eventType = event.InvocationEventType ?? '';
 
   let vcArn: string;
   try {
@@ -261,126 +388,79 @@ async function handleNewInboundCall(event: ChimeEvent): Promise<ChimeResponse> {
     return respond([{ Type: 'Hangup' }]);
   }
 
-  // ───── Pre-warm AgentCore microVM ─────
-  //
-  // Compute the deterministic session id from the caller's E.164 +
-  // server-side pepper, then issue a SigV4-signed POST to the
-  // AgentCore Runtime /invocations endpoint with that session id in
-  // the X-Amzn-Bedrock-AgentCore-Runtime-Session-Id header. AgentCore
-  // pins the microVM to that session id ("microVM stickiness"); when
-  // the bridge later opens its wss connection with the same id it
-  // attaches to the same warm container.
-  //
-  // Awaited so the phone keeps ringing while the agent finishes its
-  // per-call setup (prompt render + Nova Sonic stream open + MCP tool
-  // discovery + BidiAgent.start + prime-with-Hi). Failure here is
-  // logged but NOT propagated — the bridge's /ws handler has a cold-
-  // start fallback path so the call still completes (anonymous mode).
+  // Derive the deterministic session id (HMAC of E.164 + pepper). Anonymous
+  // callers and the no-runtime-arn state have no warm session to wait for.
   let sessionId: string | null = null;
+  let derived: {
+    customerId: string;
+    anonymous: boolean;
+    fromLast4: string;
+    sessionId: string | null;
+  } | null = null;
   if (AGENT_RUNTIME_ARN) {
     try {
       const pepper = await getCustomerIdPepper();
-      const derived = pstnCustomer.derive(from, pepper);
-      sessionId = derived.sessionId;
-      if (sessionId) {
-        const warmupBody = {
-          type: 'warmup',
-          raw_from: from,
-          anonymous: derived.anonymous,
-          from_last4: derived.fromLast4,
-          call_id: aLegCallId,
-          voice_id: AGENT_VOICE_ID,
-        };
-        const startedAt = Date.now();
-        const result = await agentcoreWarmup.warmup({
-          runtimeArn: AGENT_RUNTIME_ARN,
-          region: REGION,
-          sessionId,
-          body: warmupBody,
-        });
-        const elapsedMs = Date.now() - startedAt;
-        if (result.status === 200) {
-          logInfo('warmup_ok', {
-            transactionId: txId,
-            fromLast4: derived.fromLast4,
-            customerId: derived.customerId,
-            elapsedMs,
-          });
-        } else {
-          logWarn('warmup_non_200', {
-            transactionId: txId,
-            fromLast4: derived.fromLast4,
-            status: result.status,
-            elapsedMs,
-            // Body intentionally trimmed — may contain stack traces from
-            // the agent that include unrelated identifiers.
-            bodyHead: (result.body ?? '').slice(0, 200),
-          });
-        }
-      } else {
-        // Anonymous caller — sessionId null by design. Fall through to
-        // CallAndBridge without warmup; bridge takes the cold-start
-        // path and the agent uses anonymous mode.
-        logInfo('warmup_skipped_anonymous_caller', { transactionId: txId });
-      }
+      derived = pstnCustomer.derive(from, pepper);
+      sessionId = derived?.sessionId ?? null;
     } catch (err: unknown) {
-      // Best-effort warmup. Log + continue. The bridge's /ws cold path
-      // handles a missing warm-cache entry by building an anonymous
-      // session, so the call completes either way.
-      logWarn('warmup_failed', {
+      logWarn('session_id_derive_failed', {
         transactionId: txId,
         error: (err as Error)?.message ?? String(err),
       });
       sessionId = null;
     }
-  } else {
-    // AGENT_RUNTIME_ARN env var not set — pre-pre-warm-deploy state.
-    // Leave sessionId null; CallAndBridge proceeds without the SIP
-    // header and the bridge falls through to the anonymous path.
-    logInfo('warmup_skipped_no_runtime_arn', { transactionId: txId });
   }
 
-  // CallAndBridge to the VC. The Uri is the caller's E.164 — it's the
-  // user-part of the SIP Request-URI on the B-leg and shows up in SIP
-  // logs as a traceable breadcrumb. The Arn identifies the target VC;
-  // its origination routes then forward the INVITE via TCP/5060 to the
-  // NLB that fronts our SIP gateway cluster.
-  //
-  // CallerIdNumber: Chime requires either a number we own or the A-leg
-  // `From`. We use the A-leg `From` (the original caller) so outbound
-  // Caller Identification presentation matches the originating caller.
-  //
-  // SipHeaders: when we successfully pre-warmed an AgentCore microVM,
-  // we ride the session id forward on the CallAndBridge action so the
-  // SIP gateway sees it on the INVITE headers and feeds it to its wss
-  // connection. Per
-  // https://docs.aws.amazon.com/chime-sdk/latest/dg/call-and-bridge.html
-  // SipHeaders is a top-level parameter of the action (sibling of
-  // Endpoints), NOT a property of the endpoint object. Earlier
-  // attempts placed it inside the endpoint and Chime silently dropped
-  // the field. Limits per https://docs.aws.amazon.com/chime-sdk/latest/dg/sip-headers.html:
-  // ≤20 entries (analogous to CreateSipMediaApplicationCall API), each
-  // value ≤2048 characters, custom names must start with X-, and X-AMZN
-  // is reserved.
-  const bridgeParams: Record<string, unknown> = {
-    CallTimeoutSeconds: CALL_BRIDGE_TIMEOUT_SECONDS,
-    CallerIdNumber: from,
-    Endpoints: [
-      {
-        BridgeEndpointType: 'AWS',
-        Arn: vcArn,
-        Uri: from || 'agent',
-      },
-    ],
-  };
-  if (sessionId) {
-    bridgeParams.SipHeaders = { 'X-Session-Id': sessionId };
+  if (eventType === 'NEW_INBOUND_CALL') {
+    logInfo('new_inbound_call', {
+      transactionId: txId,
+      fromLast4: lastFour(from),
+      sipApplicationId: event.CallDetails?.SipApplicationId ?? '',
+      hasSessionId: Boolean(sessionId),
+      deploymentPrefix: DEPLOYMENT_PREFIX,
+    });
   }
-  const bridge: ChimeAction = {
-    Type: 'CallAndBridge',
-    Parameters: bridgeParams,
-  };
-  return respond([bridge]);
+
+  // Anonymous caller or pre-warm not configured -> bridge immediately on the
+  // cold-anonymous path (no session header). Nothing to wait for.
+  if (!sessionId || !derived) {
+    logInfo('ring_poll_bridge_anonymous', { transactionId: txId });
+    return respond([buildBridgeAction(vcArn, from, null)]);
+  }
+
+  // Probe the idempotent warmup (also boots the microVM on the first tick).
+  const elapsedMs = callElapsedMs(event);
+  const state = await probeWarmup(sessionId, from, derived, aLegCallId, txId);
+
+  if (state === 'ready') {
+    logInfo('warm_ready_bridging', {
+      transactionId: txId,
+      fromLast4: derived.fromLast4,
+      customerId: derived.customerId,
+      elapsedMs,
+    });
+    return respond([buildBridgeAction(vcArn, from, sessionId)]);
+  }
+
+  if (elapsedMs >= RING_POLL_BUDGET_MS) {
+    // Cold start is taking longer than the ring budget. Bridge anyway with the
+    // session id so the bridge's own ws attempt can still catch the microVM as
+    // it finishes booting — better than ringing past the caller's patience.
+    logWarn('ring_budget_exhausted_bridging', {
+      transactionId: txId,
+      fromLast4: derived.fromLast4,
+      elapsedMs,
+    });
+    return respond([buildBridgeAction(vcArn, from, sessionId)]);
+  }
+
+  // Still warming and budget remains -> keep the caller ringing, re-probe next tick.
+  logInfo('ring_poll_waiting', {
+    transactionId: txId,
+    fromLast4: derived.fromLast4,
+    elapsedMs,
+  });
+  return respond([pauseAction(RING_POLL_PAUSE_MS)]);
 }
 
 export const handler = async (event: ChimeEvent): Promise<ChimeResponse> => {
@@ -416,7 +496,13 @@ export const handler = async (event: ChimeEvent): Promise<ChimeResponse> => {
   }
 
   if (eventType === 'NEW_INBOUND_CALL') {
-    return handleNewInboundCall(event);
+    return handleInboundRingPoll(event);
+  }
+
+  if (eventType === 'ACTION_SUCCESSFUL' && actionType === 'Pause') {
+    // Ring-and-poll loop tick: the caller is still ringing after our Pause.
+    // Re-probe warmup and either bridge (ready) or ring again (still warming).
+    return handleInboundRingPoll(event);
   }
 
   if (eventType === 'ACTION_SUCCESSFUL' && actionType === 'CallAndBridge') {
