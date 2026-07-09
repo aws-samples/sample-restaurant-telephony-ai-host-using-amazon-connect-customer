@@ -379,6 +379,39 @@ if ! [[ "$PROJECT_PREFIX" =~ ^[a-z][a-z0-9-]{1,19}$ ]]; then
   exit 2
 fi
 
+# ─── AWS account guard ──────────────────────────────────────────────────────
+# Capture the account these credentials resolve to, up front, and re-verify it
+# before every deploy (see assert_account + should_deploy). This stops a
+# mid-run credential expiry from silently retargeting a DIFFERENT account and
+# creating stray stacks there (which happened once when short-lived creds
+# lapsed and the default credential chain fell back to an unrelated account).
+#
+# No account IDs are hardcoded here — this repo is public. For strict
+# enforcement, pin the target account by exporting EXPECTED_ACCOUNT_ID before
+# running:  EXPECTED_ACCOUNT_ID=<id> ./scripts/deploy-all.sh ...
+DEPLOY_ACCOUNT=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "")
+if [ -z "$DEPLOY_ACCOUNT" ]; then
+  print_error "Could not resolve an AWS account — credentials are missing or expired. Aborting before any deploy."
+  exit 3
+fi
+print_info "AWS account in use: $DEPLOY_ACCOUNT"
+if [ -n "${EXPECTED_ACCOUNT_ID:-}" ] && [ "$DEPLOY_ACCOUNT" != "$EXPECTED_ACCOUNT_ID" ]; then
+  print_error "Account mismatch: credentials resolve to $DEPLOY_ACCOUNT but EXPECTED_ACCOUNT_ID=$EXPECTED_ACCOUNT_ID. Aborting."
+  exit 3
+fi
+
+# assert_account — re-verify before each deploy that credentials still resolve
+# to the SAME account captured at start. Catches a mid-run credential refresh
+# or expiry that would otherwise retarget a different account.
+assert_account() {
+  local now
+  now=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "")
+  if [ -z "$now" ] || [ "$now" != "$DEPLOY_ACCOUNT" ]; then
+    print_error "AWS account changed mid-run (start=$DEPLOY_ACCOUNT now='${now:-<none>}') — credentials likely expired. Aborting to avoid deploying to the wrong account."
+    exit 3
+  fi
+}
+
 # Validate --only key against the known component set.
 VALID_COMPONENTS="tel-ddb tel-location tel-lambdas tel-apigw tel-gateway tel-network tel-agent-ecr tel-agent-build tel-agent-runtime tel-sip-gateway tel-ingress-number tel-ingress tel-synthetic-data"
 if [ -n "$ONLY_COMPONENT" ]; then
@@ -398,10 +431,14 @@ fi
 should_deploy() {
   local component="$1"
   if [ -n "$ONLY_COMPONENT" ]; then
-    [ "$ONLY_COMPONENT" = "$component" ]
-    return
+    if [ "$ONLY_COMPONENT" = "$component" ]; then
+      assert_account   # re-verify account right before we actually deploy
+      return 0
+    fi
+    return 1
   fi
   if [ "$FORCE_DEPLOY" = true ] || [ "$(is_deployed "$component")" != "true" ]; then
+    assert_account     # re-verify account right before we actually deploy
     return 0
   fi
   return 1
