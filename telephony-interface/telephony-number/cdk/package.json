@@ -20,7 +20,7 @@
     "typescript": "~5.9.3"
   },
   "dependencies": {
-    "aws-cdk-lib": "^2.257.0",
+    "aws-cdk-lib": "^2.262.0",
     "cdk-amazon-chime-resources": "^3",
     "cdk-nag": "^2",
     "constructs": "^10.0.0"
