@@ -8,44 +8,36 @@ import { Construct } from 'constructs';
 import * as path from 'path';
 
 /**
- * `${prefix}-AgentCoreGatewayStack` — an `AWS::BedrockAgentCore::Gateway`
- * (provisioned via a custom-resource Provider) that fronts the ordering
- * REST API with MCP + AWS_IAM auth.
+ * `${prefix}-AgentCoreGatewayStack` — provisions an AgentCore Gateway with
+ * CUSTOM_JWT inbound auth so Amazon Connect can invoke MCP tools.
  *
- * Ported verbatim from `reference-project/backend/agentcore-gateway/cdk/lib/cdk-stack.ts`.
- * Changes vs reference (see NOTICE.md for the pinned commit SHA):
- *   1. `GatewayStackProps.apiGatewayId` (TS-prop) DELETED → local
- *      `CfnParameter`s on the stack itself (`DeploymentPrefix`, `ApiGatewayId`,
- *      `ApiGatewayUrl`, `ApiGatewayRestApiId`). Each is threaded in at deploy
- *      time from `cdk-outputs/tel-apigw.json` by `scripts/deploy-all.sh`.
- *   2. Gateway name rewritten from the literal `'qsr-ordering-gateway'` to
- *      `cdk.Fn.sub('${P}-gateway', { P: deploymentPrefix.valueAsString })`.
- *   3. Gateway service-role name rewritten to `${prefix}-gateway-service-role`.
- *   4. Provisioner Lambda gains an explicit `functionName`
- *      (`${prefix}-GatewayHandler`) + explicit `roleName`
- *      (`${prefix}-gateway-handler-role`) + explicit LogGroup (1-month
- *      retention, DESTROY on stack delete).
- *   5. API Gateway IAM resource ARNs in the provisioner policy interpolate
- *      `apiGatewayId.valueAsString` and `apiGatewayRestApiId.valueAsString`
- *      via `cdk.Fn.sub` so the rendered ARNs target the specific REST API id
- *      (apigateway restapis path + execute-api resource path).
- *   6. Every `CfnOutput` emitted WITHOUT `exportName` (P5).
+ * Creates:
+ *   - AgentCore Gateway (CUSTOM_JWT auth, MCP protocol) via custom resource
+ *
+ * CfnParameters:
+ *   DeploymentPrefix    — resource name prefix
+ *   ApiGatewayId        — REST API ID from cn-apigw
+ *   ApiGatewayUrl       — API Gateway invoke URL from cn-apigw
+ *   ApiGatewayRestApiId — REST API ID from cn-apigw
+ *   ConnectInstanceUrl  — Connect instance URL for JWT inbound auth discovery
+ *
+ * CfnOutputs:
+ *   GatewayId    — consumed by cn-ai-agent
+ *   GatewayUrl   — AgentCore Gateway MCP endpoint, consumed by cn-ai-agent
+ *   + observability outputs
  */
 export class CdkStack extends cdk.Stack {
-  public readonly gatewayId: string;
-  public readonly gatewayUrl: string;
-
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    // ───────────── CfnParameters (4) ─────────────
+    // ───────────── CfnParameters (6) ─────────────
     const deploymentPrefix = new cdk.CfnParameter(this, 'DeploymentPrefix', {
       type: 'String',
       allowedPattern: '^[a-z][a-z0-9-]{1,19}$',
       constraintDescription:
         'must be 1-20 chars, lowercase, starting with a letter',
       description:
-        'Deployment prefix applied to every physical resource + IAM ARN in this stack (R19).',
+        'Deployment prefix applied to every physical resource + IAM ARN in this stack.',
     });
     const prefix = deploymentPrefix.valueAsString;
 
@@ -53,21 +45,33 @@ export class CdkStack extends cdk.Stack {
       type: 'String',
       minLength: 1,
       description:
-        'API Gateway id from tel-apigw (threaded by deploy-all.sh from cdk-outputs/tel-apigw.json).',
+        'API Gateway id from cn-apigw (threaded by deploy-all.sh from cdk-outputs/cn-apigw.json).',
     });
 
     const apiGatewayUrl = new cdk.CfnParameter(this, 'ApiGatewayUrl', {
       type: 'String',
       minLength: 1,
       description:
-        'API Gateway invoke URL from tel-apigw (threaded by deploy-all.sh). Used for observability outputs.',
+        'API Gateway invoke URL from cn-apigw.',
     });
 
     const apiGatewayRestApiId = new cdk.CfnParameter(this, 'ApiGatewayRestApiId', {
       type: 'String',
       minLength: 1,
       description:
-        'API Gateway REST API id from tel-apigw. Interpolated into the provisioner Lambda\'s execute-api resource ARN.',
+        'API Gateway REST API id from cn-apigw.',
+    });
+
+    // ConnectInstanceUrl: the Amazon Connect instance URL (without trailing slash).
+    // Used to configure CUSTOM_JWT inbound auth on the AgentCore Gateway so that
+    // Connect can authenticate when invoking MCP tools.
+    // Example: https://qsr-cn-restaurant.my.connect.aws
+    // Format: https://<instance-alias>.my.connect.aws
+    const connectInstanceUrl = new cdk.CfnParameter(this, 'ConnectInstanceUrl', {
+      type: 'String',
+      minLength: 1,
+      description:
+        'Connect instance URL (e.g. https://qsr-cn-restaurant.my.connect.aws). Used for JWT inbound auth on the gateway.',
     });
 
     // Stage is fixed — the ported stack has always used `prod`. Not a
@@ -77,7 +81,6 @@ export class CdkStack extends cdk.Stack {
 
     // Prefixed physical names (rendered at deploy time via Fn::Sub).
     const gatewayName = cdk.Fn.sub('${P}-gateway', { P: prefix });
-    const gatewayServiceRoleName = cdk.Fn.sub('${P}-gateway-service-role', { P: prefix });
     const gatewayHandlerFunctionName = cdk.Fn.sub('${P}-GatewayHandler', { P: prefix });
     const gatewayHandlerRoleName = cdk.Fn.sub('${P}-gateway-handler-role', { P: prefix });
 
@@ -127,31 +130,54 @@ export class CdkStack extends cdk.Stack {
     });
 
     // ───────────── Provisioner Lambda IAM policy ─────────────
-    // 1) bedrock-agentcore:* management actions — no resource-level IAM support
-    //    (design §11.5b); suppressed at stack level in bin/cdk.ts.
+    // 1) bedrock-agentcore gateway management actions.
+    // Gateway ARN pattern: arn:aws:bedrock-agentcore:REGION:ACCOUNT:gateway/${gatewayName}-{random}
+    // CreateGateway and ListGateways cannot be scoped to a specific gateway ARN
+    // because the gateway ID is not known until after creation. All other actions
+    // are scoped to the specific gateway name prefix this Lambda manages.
     gatewayHandlerFunction.addToRolePolicy(new iam.PolicyStatement({
+      sid: 'AgentCoreGatewayCreate',
       actions: [
+        // CreateGateway and List* cannot be scoped — gateway ID is unknown at create time.
+        // See: https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonbedrockagentcore.html
         'bedrock-agentcore:CreateGateway',
-        'bedrock-agentcore:DeleteGateway',
-        'bedrock-agentcore:GetGateway',
-        'bedrock-agentcore:CreateGatewayTarget',
-        'bedrock-agentcore:DeleteGatewayTarget',
-        'bedrock-agentcore:GetGatewayTarget',
         'bedrock-agentcore:ListGateways',
         'bedrock-agentcore:ListGatewayTargets',
-        'bedrock-agentcore:SynchronizeGatewayTargets',
-        'bedrock-agentcore:UpdateGateway',
-        'bedrock-agentcore:UpdateGatewayTarget',
         'bedrock-agentcore:CreateWorkloadIdentity',
-        'bedrock-agentcore:DeleteWorkloadIdentity',
-        'bedrock-agentcore:GetWorkloadIdentity',
         'bedrock-agentcore:ListWorkloadIdentities',
       ],
       resources: ['*'],
     }));
 
-    // 2) IAM role CRUD for the gateway service role — scoped to THIS prefix's
-    //    service role ARN via Fn::Sub.
+    gatewayHandlerFunction.addToRolePolicy(new iam.PolicyStatement({
+      sid: 'AgentCoreGatewayManage',
+      actions: [
+        'bedrock-agentcore:DeleteGateway',
+        'bedrock-agentcore:GetGateway',
+        'bedrock-agentcore:CreateGatewayTarget',
+        'bedrock-agentcore:DeleteGatewayTarget',
+        'bedrock-agentcore:GetGatewayTarget',
+        'bedrock-agentcore:SynchronizeGatewayTargets',
+        'bedrock-agentcore:UpdateGateway',
+        'bedrock-agentcore:UpdateGatewayTarget',
+        'bedrock-agentcore:DeleteWorkloadIdentity',
+        'bedrock-agentcore:GetWorkloadIdentity',
+      ],
+      // Scoped to the gateway name prefix this Lambda manages.
+      // Gateway ARN format: arn:aws:bedrock-agentcore:REGION:ACCOUNT:gateway/${gatewayName}-{10chars}
+      resources: [
+        cdk.Fn.sub(
+          'arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:gateway/${P}-gateway*',
+          { P: prefix },
+        ),
+      ],
+    }));
+
+    // 2) IAM role CRUD for the gateway service role.
+    // The handler creates a /service-role/ path role named
+    // AmazonBedrockAgentCoreGatewayServiceRole-${gatewayName} and a managed
+    // policy named AmazonBedrockAgentCoreGatewayBasePolicyProd-${gatewayId}.
+    // Resources are scoped to exactly those name patterns + /service-role/ path.
     gatewayHandlerFunction.addToRolePolicy(new iam.PolicyStatement({
       actions: [
         'iam:CreateRole',
@@ -161,20 +187,32 @@ export class CdkStack extends cdk.Stack {
         'iam:DeleteRolePolicy',
         'iam:ListRolePolicies',
         'iam:ListAttachedRolePolicies',
+        'iam:AttachRolePolicy',
         'iam:DetachRolePolicy',
         'iam:PassRole',
       ],
       resources: [
-        cdk.Fn.sub('arn:aws:iam::${A}:role/${RN}', {
-          A: cdk.Aws.ACCOUNT_ID,
-          RN: gatewayServiceRoleName,
-        }),
+        cdk.Fn.sub(
+          'arn:aws:iam::${AWS::AccountId}:role/service-role/AmazonBedrockAgentCoreGatewayServiceRole-${P}-gateway*',
+          { P: prefix },
+        ),
+      ],
+    }));
+
+    gatewayHandlerFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'iam:CreatePolicy',
+        'iam:DeletePolicy',
+        'iam:GetPolicy',
+      ],
+      resources: [
+        cdk.Fn.sub(
+          'arn:aws:iam::${AWS::AccountId}:policy/service-role/AmazonBedrockAgentCoreGatewayBasePolicyProd-*',
+        ),
       ],
     }));
 
     // 3) API Gateway read — fetch the OpenAPI schema at target-create time.
-    //    The handler also needs to allow execute-api:Invoke when it writes
-    //    the service role's inline policy; scope that via RestApiId + stage.
     gatewayHandlerFunction.addToRolePolicy(new iam.PolicyStatement({
       actions: [
         'apigateway:GET',
@@ -227,22 +265,16 @@ export class CdkStack extends cdk.Stack {
         Region: cdk.Stack.of(this).region,
         AccountId: cdk.Stack.of(this).account,
         DeployTimestamp: new Date().toISOString(),
+        // ConnectInstanceUrl enables CUSTOM_JWT inbound auth so Amazon Connect
+        // can authenticate when invoking MCP tools through this gateway.
+        ConnectInstanceUrl: connectInstanceUrl.valueAsString,
       },
     });
 
-    // Extract outputs from Custom Resource for TS-side consumers
-    // (none in this project — downstream AgentRuntimeStack picks them up via CfnOutput).
-    this.gatewayId = gateway.getAttString('GatewayId');
-    this.gatewayUrl = gateway.getAttString('GatewayUrl');
-
-    // ───────────── CfnOutputs (NO exportName per P5) ─────────────
-    //
-    // GatewayUrl is the PRIMARY downstream — consumed by
-    // `${prefix}-AgentRuntimeStack` as the `AgentCoreGatewayUrl` CfnParameter
-    // via `scripts/deploy-all.sh` reading `cdk-outputs/tel-gateway.json`.
+    // ───────────── CfnOutputs ─────────────
     new cdk.CfnOutput(this, 'GatewayUrl', {
       value: gateway.getAttString('GatewayUrl'),
-      description: 'AgentCore Gateway URL — consumed by tel-agent-runtime via CfnParameter',
+      description: 'AgentCore Gateway MCP endpoint URL',
     });
 
     new cdk.CfnOutput(this, 'GatewayId', {
@@ -303,6 +335,15 @@ export class CdkStack extends cdk.Stack {
     // Tag the stack's resources with the deployment prefix for tenant
     // observability in the AgentCore console.
     cdk.Tags.of(this).add('DeploymentPrefix', prefix);
-    cdk.Tags.of(this).add('Application', 'telephony-voice-ordering-agent');
+    cdk.Tags.of(this).add('Application', 'restaurant-connect-ai-host');
+
+    // McpNamespace = GatewayId — consumed by cn-ai-agent for:
+    //   1. AppIntegrations registration (done in cn-ai-agent where Connect instance is known)
+    //   2. Security profile namespace
+    //   3. MCP toolId construction
+    new cdk.CfnOutput(this, 'McpNamespace', {
+      value: gateway.getAttString('GatewayId'),
+      description: 'AppIntegrations namespace for the MCP server (= gateway ID)',
+    });
   }
 }

@@ -79,7 +79,7 @@ function parseArgs() {
     companyName: '',
     location: '',
     businessName: '',
-    deploymentPrefix: 'qsr-tel',
+    deploymentPrefix: 'qsr-cn',
     nonInteractive: false,
   };
   for (let i = 0; i < args.length; i++) {
@@ -114,7 +114,7 @@ Optional:
                             Resolves to /\${prefix}/customer-id-pepper.
   --non-interactive         Skip all interactive prompts.
 
-Reads table names from cdk-outputs/tel-ddb.json (keyed on "DynamoDBStack").
+Reads table names from cdk-outputs/cn-ddb.json (keyed on "DynamoDBStack").
 `);
         process.exit(0);
     }
@@ -123,10 +123,10 @@ Reads table names from cdk-outputs/tel-ddb.json (keyed on "DynamoDBStack").
 }
 
 function loadTableNames(workspaceRoot) {
-  const outputsPath = path.join(workspaceRoot, 'cdk-outputs', 'tel-ddb.json');
+  const outputsPath = path.join(workspaceRoot, 'cdk-outputs', 'cn-ddb.json');
   if (!fs.existsSync(outputsPath)) {
     fail(`Deployment outputs not found at: ${outputsPath}`);
-    info('Run the tel-ddb layer of scripts/deploy-all.sh first.');
+    info('Run the cn-ddb layer of scripts/deploy-all.sh first.');
     return null;
   }
   let outputs;
@@ -286,7 +286,7 @@ async function main() {
   const workspaceRoot = path.resolve(__dirname, '..', '..');
   const tableNames = loadTableNames(workspaceRoot);
   if (!tableNames) return 1;
-  ok(`Tables resolved from cdk-outputs/tel-ddb.json`);
+  ok(`Tables resolved from cdk-outputs/cn-ddb.json`);
 
   // -- Pepper + customerId (loyalty path only) ---------------------------
   let customerId = '';
@@ -299,7 +299,7 @@ async function main() {
       pepper = await loadPepper(pepperPath);
     } catch (err) {
       fail(`Failed to read SSM pepper: ${err.message}`);
-      info('Check that tel-agent-runtime has been deployed (the runtime stack provisions this SecureString).');
+      info('Check that cn-gateway has been deployed (the runtime stack provisions this SecureString).');
       return 1;
     }
     ok(`Pepper loaded (length=${pepper.length} bytes)`);
@@ -420,7 +420,7 @@ async function main() {
   } else {
     ok(`Seeded ${locations.length} locations, ${menuItems.length} menu items (no loyalty customer)`);
     info('Anonymous callers can order end-to-end. To add a loyalty caller later, re-run:');
-    info('  ./scripts/deploy-all.sh --only tel-synthetic-data --user-name "Jane Doe" --user-phone +1...');
+    info('  ./scripts/deploy-all.sh --only cn-synthetic-data --user-name "Jane Doe" --user-phone +1...');
   }
 
   closeRl();

@@ -53,7 +53,7 @@ NagSuppressions.addStackSuppressions(stack, [
   {
     id: 'AwsSolutions-IAM5',
     reason:
-      'bedrock-agentcore:CreateGateway / DeleteGateway / CreateGatewayTarget / UpdateGatewayTarget / SynchronizeGatewayTargets / Create*WorkloadIdentit* etc. do not support resource-level IAM. Wildcards are account+region-scoped via the provisioner Lambda\'s execution role; documented in design §11.5b. Residual Provider-framework wildcards (s3:* on the CDK staging bucket, iam:PassRole scoped to `${prefix}-gateway-service-role`) are also accepted here — every wildcard is either service-mandated or scoped to a prefix this feature owns.',
+      'bedrock-agentcore:CreateGateway, ListGateways, ListGatewayTargets, CreateWorkloadIdentity, and ListWorkloadIdentities cannot be scoped to a specific gateway ARN because the gateway ID is not known until after creation. All other bedrock-agentcore actions are scoped to the specific gateway name prefix. Residual Provider-framework wildcards (s3:* on the CDK staging bucket) are CDK-managed and not user-modifiable.',
   },
   {
     id: 'AwsSolutions-L1',

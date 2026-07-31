@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Telephony Voice Agent — How a Call Works (Step by Step)</title>
+<title>Connect Voice Agent — How a Call Works (Step by Step)</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <style>
   :root {
@@ -73,10 +73,6 @@
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
 
   .ctrls { display: flex; gap: 10px; align-items: center; }
-  /* Speed slider lives left of the Auto-play button. The slider's
-     value drives the autoplay step interval inversely — higher value
-     on the slider = faster autoplay. The label sits above the slider
-     in compact mode so it doesn't crowd the buttons. */
   .speed-control {
     display: flex; align-items: center; gap: 8px;
     padding: 4px 10px;
@@ -142,12 +138,6 @@
     background: linear-gradient(180deg, rgba(10,15,26,.9), rgba(5,8,15,.85));
     backdrop-filter: blur(10px);
     padding: 16px 18px;
-    /* Explicit 60/40 split of the sidebar via CSS grid — flex-basis 0
-       + flex-grow ratios wasn't enforcing the split reliably (flex
-       items were falling back to content-size when the inner
-       scroll container couldn't resolve its height), letting
-       children paint over the panel below. Grid tracks are
-       unambiguous. */
     display: grid;
     grid-template-rows: 3fr 2fr;
     gap: 12px;
@@ -166,27 +156,22 @@
     text-transform: uppercase; color: var(--txt-dim); margin: 0 0 10px 0;
   }
 
-  /* Step panel: vertical flex with a scrollable middle (the prose +
-     meta). Counter, title, nav, and progress stay fixed so the
-     Previous/Next/Start/End buttons NEVER overflow the panel box.
-     Height is governed by the sidebar's grid track (3fr of 5 = 60%). */
   #stepBox {
-    min-height: 0;          /* grid clipping enabler */
+    min-height: 0;
     display: flex; flex-direction: column;
-    overflow: hidden;       /* hard cap — children clip inside this box */
+    overflow: hidden;
   }
   #stepBox .step-counter,
   #stepBox .step-title,
   #stepBox #stepNav,
   #stepBox .progress {
-    flex: 0 0 auto;         /* fixed rows at top/bottom */
+    flex: 0 0 auto;
   }
-  /* Scrollable middle: prose body + meta grouped so they scroll together. */
   .step-scroll {
     flex: 1 1 auto;
     min-height: 0;
     overflow-y: auto;
-    padding-right: 4px;     /* breathing room for scrollbar */
+    padding-right: 4px;
   }
   .step-scroll::-webkit-scrollbar { width: 6px; }
   .step-scroll::-webkit-scrollbar-track { background: transparent; }
@@ -225,7 +210,7 @@
     padding: 8px 0;
     font-size: 14px;
     line-height: 1;
-    min-width: 0;   /* lets buttons shrink below content width if needed */
+    min-width: 0;
   }
   .progress {
     height: 3px; background: rgba(90,164,255,.12); border-radius: 2px;
@@ -236,8 +221,6 @@
     width: 0; transition: width .35s;
   }
 
-  /* "All steps" list panel below the step box. Height is governed by
-     the sidebar's grid track (2fr of 5 = 40%). */
   #allStepsPanel {
     min-height: 0;
     display: flex; flex-direction: column;
@@ -272,7 +255,6 @@
     font: 600 10px var(--mono); text-align: center; line-height: 22px;
   }
 
-  /* Nodes — vertical layout: icon on top, text below. */
   #nodeLayer {
     position: absolute; inset: 0; pointer-events: none;
   }
@@ -301,7 +283,6 @@
   .node-sub { font-size: 9px; color: var(--txt-dim); font-family: var(--mono); margin-top: 1px; }
   .node-sub b { color: #7ab8ff; font-weight: 500; }
 
-  /* Clusters (pure SVG background regions) */
   .cluster-label {
     font: 600 11px var(--sans);
     fill: rgba(180,210,255,.55);
@@ -309,15 +290,13 @@
     text-transform: uppercase;
   }
 
-  /* Edges — idle lines are colored by traffic type at low opacity
-     so people can "read" the topology even when nothing is animating. */
   .edge-base {
     fill: none; stroke-width: 1.4;
     stroke-dasharray: 4 5;
     opacity: .45;
     transition: opacity .35s, stroke-width .35s;
   }
-  .edge-base.live { opacity: 0; }  /* hidden when the hot version is pulsing */
+  .edge-base.live { opacity: 0; }
   .edge-hot {
     stroke-width: 2.2; fill: none;
     opacity: 0;
@@ -328,10 +307,8 @@
     filter: drop-shadow(0 0 6px currentColor);
   }
 
-  /* Packets (animated dots) */
   .packet { filter: drop-shadow(0 0 8px currentColor); }
 
-  /* Tooltips for nodes */
   .node-tooltip {
     position: absolute;
     background: rgba(15,25,45,.96);
@@ -348,7 +325,6 @@
   .node-tooltip.show { opacity: 1; transform: translateY(0); }
   .node-tooltip .tooltip-title { font-weight: 700; color: #fff; margin-bottom: 3px; }
 
-  /* Ports indicator badges above select nodes */
   .port-badge {
     position: absolute;
     background: rgba(90,164,255,.2);
@@ -365,12 +341,12 @@
 </head>
 <body>
 <header>
-  <h1>Telephony Voice Agent &mdash; How a Call Works</h1>
+  <h1>Connect Voice Agent &mdash; How a Call Works</h1>
   <div class="ctrls">
     <div class="speed-control" title="Auto-play speed">
       <label for="speedSlider">Speed</label>
       <input type="range" id="speedSlider" min="1" max="10" value="3" step="1" />
-      <span class="speed-value" id="speedValue">1.0×</span>
+      <span class="speed-value" id="speedValue">1.0&times;</span>
     </div>
     <button id="autoPlay">Auto-play</button>
     <button id="restart">Restart</button>
@@ -402,17 +378,17 @@
 
   <aside>
     <div class="panel" id="stepBox">
-      <div class="step-counter" id="stepCounter">STEP 0 OF 15</div>
+      <div class="step-counter" id="stepCounter">STEP 0 OF 9</div>
       <div class="step-title" id="stepTitle">Welcome</div>
       <div class="step-scroll">
         <div class="step-body" id="stepBody">Choose <b>Next</b> to start walking through what happens when a customer calls the restaurant.</div>
         <div class="step-meta" id="stepMeta"></div>
       </div>
       <div id="stepNav">
-        <button id="jumpStart" title="First step">⏮</button>
-        <button id="prevStep" title="Previous step">◀</button>
-        <button id="nextStep" class="primary" title="Next step">▶</button>
-        <button id="jumpEnd" title="Last step">⏭</button>
+        <button id="jumpStart" title="First step">&#x23EE;</button>
+        <button id="prevStep" title="Previous step">&#x25C4;</button>
+        <button id="nextStep" class="primary" title="Next step">&#x25BA;</button>
+        <button id="jumpEnd" title="Last step">&#x23ED;</button>
       </div>
       <div class="progress"><div class="progress-inner" id="progressInner"></div></div>
     </div>
@@ -427,292 +403,150 @@
 <div class="node-tooltip" id="tooltip"></div>
 
 <script>
-// ═══════════════════════════════════════════════════════════════════
-// TOPOLOGY — r7 architecture (task public IPs, NLB TCP-only)
-// Each node has: x, y (center), w, h, label, sub (monospace line), icon
-// ═══════════════════════════════════════════════════════════════════
 
 const NODES = {
-  caller:     { x:  20, y: 370, w: 110, h: 78, label: 'Caller',            sub: 'PSTN',                          icon: 'phone' },
-  chimeVC:    { x: 160, y: 370, w: 130, h: 78, label: 'Chime Voice Conn.', sub: 'SIP trunk',                     icon: 'chime' },
-  sma:        { x: 160, y: 210, w: 130, h: 78, label: 'SMA Lambda',        sub: 'sma-handler',                   icon: 'lambda' },
-  nlb:        { x: 330, y: 290, w: 120, h: 78, label: 'Public NLB',        sub: '<b>TCP 5060 only</b> (r7)',     icon: 'elb' },
-  drachtio:   { x: 490, y: 290, w: 140, h: 78, label: 'drachtio-server',   sub: 'SIP · Sofia-SIP',               icon: 'fargate' },
-  rtpBridge:  { x: 490, y: 450, w: 140, h: 78, label: 'Node RTP Bridge',   sub: '<b>public IP :16000-48</b>',    icon: 'fargate' },
-  // AgentCore services — Nova Sonic, Runtime (middle, hub), Gateway.
-  novaSonic:  { x: 680, y: 290, w: 150, h: 78, label: 'Nova 2 Sonic',      sub: 'Amazon Bedrock · bidi',         icon: 'bedrock' },
-  runtime:    { x: 680, y: 450, w: 150, h: 78, label: 'AgentCore Runtime', sub: 'Strands BidiAgent',             icon: 'agentcore' },
-  mcpGw:      { x: 680, y: 610, w: 150, h: 78, label: 'AgentCore Gateway', sub: 'MCP · AWS_IAM',                 icon: 'agentcore' },
-  // Data + Backend.
-  renderer:   { x: 870, y: 210, w: 140, h: 78, label: 'Prompt Renderer',   sub: 'Lambda + DDB + SSM',            icon: 'lambda' },
-  customers:  { x: 1030, y: 210, w: 140, h: 78, label: 'Customers DDB',    sub: 'PK=CUSTOMER#...',               icon: 'dynamodb' },
-  apiGw:      { x: 870, y: 450, w: 140, h: 78, label: 'API Gateway',       sub: 'REST · AWS_IAM',                icon: 'apigw' },
-  lambdas:    { x: 1030, y: 450, w: 140, h: 78, label: 'Backend Lambdas',  sub: '10 × GetMenu, Cart, …',          icon: 'lambda' },
-  ddbTables:  { x: 1030, y: 610, w: 140, h: 78, label: 'DynamoDB Tables',  sub: 'Menu · Orders · Locs',          icon: 'dynamodb' },
+  caller:    { x:  15, y: 340, w: 140, h: 78, label: 'Phone Customer',         sub: 'Inbound call',                         icon: 'phone' },
+  connect:   { x: 175, y: 340, w: 140, h: 78, label: 'Amazon Connect',          sub: 'Contact Flow',                         icon: 'chime' },
+  lex:       { x: 335, y: 340, w: 140, h: 78, label: 'Amazon Lex V2',           sub: 'Nova Sonic \u00b7 generative engine',   icon: 'bedrock' },
+  agent:     { x: 495, y: 260, w: 140, h: 78, label: 'Q in Connect AI Agent',   sub: 'ORCHESTRATION \u00b7 Claude Haiku 4.5', icon: 'agentcore' },
+  claude:    { x: 495, y: 420, w: 140, h: 78, label: 'Amazon Bedrock',          sub: 'Claude Haiku 4.5',                     icon: 'bedrock' },
+  mcpGw:     { x: 655, y: 340, w: 140, h: 78, label: 'AgentCore Gateway',       sub: 'MCP \u00b7 CUSTOM_JWT',                 icon: 'agentcore' },
+  apiGw:     { x: 815, y: 260, w: 140, h: 78, label: 'API Gateway',             sub: 'REST \u00b7 AWS_IAM \u00b7 prod',       icon: 'apigw' },
+  lambdas:   { x: 815, y: 420, w: 140, h: 78, label: 'AWS Lambda',              sub: '10 \u00d7 GetMenu, Cart, Order\u2026',  icon: 'lambda' },
+  ddb:       { x: 975, y: 260, w: 185, h: 78, label: 'Amazon DynamoDB',         sub: 'Menu \u00b7 Orders \u00b7 Carts',       icon: 'dynamodb' },
+  location:  { x: 975, y: 420, w: 185, h: 78, label: 'Amazon Location',         sub: 'Geocode \u00b7 Nearest search',         icon: 'location' },
 };
 
 const CLUSTERS = [
-  { label: 'PSTN',              x:  10, y: 50, w: 130, h: 730, color: '#ff9f43' },
-  { label: 'Chime SDK Voice',   x: 145, y: 50, w: 155, h: 730, color: '#7cb8ff' },
-  { label: 'SIP Gateway (ECS)', x: 310, y: 50, w: 330, h: 730, color: '#34d399' },
-  { label: 'Amazon Bedrock AgentCore', x: 650, y: 50, w: 195, h: 730, color: '#d946ef' },
-  { label: 'Data + Backend',    x: 855, y: 50, w: 325, h: 730, color: '#a78bfa' },
+  { label: 'CALLER',              x:  10, y: 50, w: 150, h: 660, color: '#ff9f43' },
+  { label: 'Amazon Connect',      x: 170, y: 50, w: 150, h: 660, color: '#dd344c' },
+  { label: 'Amazon Lex V2',       x: 330, y: 50, w: 150, h: 660, color: '#22d3ee' },
+  { label: 'Amazon Q in Connect', x: 490, y: 50, w: 150, h: 660, color: '#d946ef' },
+  { label: 'MCP Gateway',         x: 650, y: 50, w: 150, h: 660, color: '#34d399' },
+  { label: 'API & Compute',       x: 810, y: 50, w: 150, h: 660, color: '#a78bfa' },
+  { label: 'Data Storage',        x: 970, y: 50, w: 200, h: 660, color: '#4d72f3' },
 ];
 
-// All the edges that exist in the system. Each step activates a subset.
-// Edges draw as dashed idle lines when inactive; animate with packets when active.
 const EDGES = [
-  // SIP signaling
-  { id: 'caller-chime',    from: 'caller',    to: 'chimeVC',   curve:   0, color: 'var(--sip)' },
-  { id: 'chime-caller',    from: 'chimeVC',   to: 'caller',    curve:  30, color: 'var(--audio-out)' },
-  { id: 'chime-sma',       from: 'chimeVC',   to: 'sma',       curve:   0, color: 'var(--ctrl)' },
-  { id: 'sma-chime',       from: 'sma',       to: 'chimeVC',   curve:   0, color: 'var(--ctrl)' },
-  { id: 'chime-nlb',       from: 'chimeVC',   to: 'nlb',       curve:   0, color: 'var(--sip)' },
-  { id: 'nlb-drachtio',    from: 'nlb',       to: 'drachtio',  curve:   0, color: 'var(--sip)' },
-  { id: 'drachtio-nlb',    from: 'drachtio',  to: 'nlb',       curve:  40, color: 'var(--sip)' },
-  { id: 'nlb-chime',       from: 'nlb',       to: 'chimeVC',   curve: -40, color: 'var(--sip)' },
-  // Direct RTP (r7 — bypasses NLB)
-  { id: 'chime-rtpbridge', from: 'chimeVC',   to: 'rtpBridge', curve:  80, color: 'var(--audio-in)' },
-  { id: 'rtpbridge-chime', from: 'rtpBridge', to: 'chimeVC',   curve: 120, color: 'var(--audio-out)' },
-  // Inside the task
-  { id: 'drachtio-bridge', from: 'drachtio',  to: 'rtpBridge', curve:   0, color: 'var(--ctrl)' },
-  // Pre-warm POST from SMA Lambda (r7.2) — SigV4-signed POST /invocations
-  // that arrives BEFORE the bridged INVITE and warms the microVM.
-  // Strong negative curve so the arc rises ABOVE the NLB + drachtio
-  // cluster on its way to AgentCore Runtime instead of cutting
-  // diagonally through their boxes.
-  { id: 'sma-runtime',     from: 'sma',       to: 'runtime',   curve: -290, color: 'var(--prompt)' },
-  // AgentCore
-  { id: 'bridge-runtime', from: 'rtpBridge', to: 'runtime',   curve: -20, color: 'var(--audio-in)' },
-  { id: 'runtime-bridge', from: 'runtime',   to: 'rtpBridge', curve:  40, color: 'var(--audio-out)' },
-  { id: 'runtime-nova',   from: 'runtime',   to: 'novaSonic', curve:   0, color: 'var(--audio-in)' },
-  { id: 'nova-runtime',   from: 'novaSonic', to: 'runtime',   curve:  30, color: 'var(--audio-out)' },
-  // Prompt renderer
-  { id: 'runtime-renderer',   from: 'runtime',  to: 'renderer',  curve:   0, color: 'var(--prompt)' },
-  { id: 'renderer-customers', from: 'renderer', to: 'customers', curve:   0, color: 'var(--db)' },
-  // MCP tools
-  { id: 'runtime-mcp', from: 'runtime', to: 'mcpGw',  curve:   0, color: 'var(--tool)' },
-  { id: 'mcp-api',     from: 'mcpGw',   to: 'apiGw',  curve:   0, color: 'var(--tool)' },
-  { id: 'api-lambdas', from: 'apiGw',   to: 'lambdas',curve:   0, color: 'var(--tool)' },
-  { id: 'lambdas-ddb', from: 'lambdas', to: 'ddbTables', curve: 0, color: 'var(--db)' },
+  { id: 'caller-connect',   from: 'caller',   to: 'connect',  curve:   0, color: 'var(--sip)' },
+  { id: 'connect-agent',   from: 'connect',  to: 'agent',    curve: -80, color: 'var(--ctrl)' },
+  { id: 'connect-lex',     from: 'connect',  to: 'lex',      curve:   0, color: 'var(--audio-in)' },
+  { id: 'lex-agent',       from: 'lex',      to: 'agent',    curve:   0, color: 'var(--ctrl)' },
+  { id: 'agent-claude',    from: 'agent',    to: 'claude',   curve:   0, color: 'var(--prompt)' },
+  { id: 'agent-mcp',       from: 'agent',    to: 'mcpGw',    curve:   0, color: 'var(--tool)' },
+  { id: 'mcp-api',         from: 'mcpGw',    to: 'apiGw',    curve:   0, color: 'var(--tool)' },
+  { id: 'api-lambdas',     from: 'apiGw',    to: 'lambdas',  curve:   0, color: 'var(--tool)' },
+  { id: 'lambdas-ddb',     from: 'lambdas',  to: 'ddb',      curve:   0, color: 'var(--db)' },
+  { id: 'lambdas-location',from: 'lambdas',  to: 'location', curve:  30, color: 'var(--db)' },
+  // Return path (pink) — tool result flows back to caller
+  { id: 'lambdas-api-ret', from: 'lambdas',  to: 'apiGw',    curve:  40, color: 'var(--audio-out)' },
+  { id: 'api-mcp-ret',     from: 'apiGw',    to: 'mcpGw',    curve:  40, color: 'var(--audio-out)' },
+  { id: 'mcp-agent-ret',   from: 'mcpGw',    to: 'agent',    curve:  40, color: 'var(--audio-out)' },
+  { id: 'agent-lex-ret',   from: 'agent',    to: 'lex',      curve:  50, color: 'var(--audio-out)' },
+  { id: 'lex-connect-ret', from: 'lex',      to: 'connect',  curve:  40, color: 'var(--audio-out)' },
+  { id: 'connect-caller-ret', from: 'connect', to: 'caller', curve:  40, color: 'var(--audio-out)' },
 ];
-
-// ═══════════════════════════════════════════════════════════════════
-// THE TUTORIAL SCRIPT — 15 steps. Each step activates specific nodes
-// and edges, fires packet animations, and shows a narration.
-// ═══════════════════════════════════════════════════════════════════
 
 const STEPS = [
   {
-    title: 'The customer picks up the phone',
-    body: 'A hungry customer dials the restaurant\'s phone number (<code>+1 800 555 0100</code>). The call travels across the public phone network — the <span class="hl">PSTN</span>.',
-    meta: { Protocol: 'PSTN → SIP', Who: 'Caller' },
-    nodes: ['caller'],
-    edges: [],
-    packets: [],
+    title: 'Customer dials the restaurant',
+    body: 'A customer dials the phone number provisioned by <span class="hl">Amazon Connect</span>. The call arrives at the Connect instance and enters the contact flow immediately.',
+    meta: { Service: 'Amazon Connect', 'Phone type': 'DID or Toll-Free', Region: 'us-east-1' },
+    nodes: ['caller', 'connect'],
+    edges: [{ edge: 'caller-connect', kind: 'sip' }],
+    packets: [{ edge: 'caller-connect', kind: 'sip', count: 2 }],
   },
   {
-    title: 'AWS Chime answers the number',
-    body: 'The phone call reaches <span class="hl">Amazon Chime SDK Voice Connector</span>, the AWS service that owns our toll-free number. Chime now has to decide: what does this phone number do?',
-    meta: { Service: 'Amazon Chime SDK Voice Connector', Region: 'us-east-1' },
-    nodes: ['caller', 'chimeVC'],
-    edges: [{ edge: 'caller-chime', kind: 'sip' }],
-    packets: [{ edge: 'caller-chime', kind: 'sip', count: 2 }],
+    title: 'Contact Flow opens Q in Connect session for the AI Agent',
+    body: 'The <span class="hl">Contact Flow</span> captures the caller ANI, calls <code>CreateWisdomSession</code> to open a session directly with the <span class="hl">Q in Connect AI Agent</span>, stores the session ARN, and plays the greeting: <i>"Thank you for calling, give me a moment to connect."</i>',
+    meta: { Block1: 'UpdateContactAttributes \u2192 callerPhoneNumber', Block2: 'CreateWisdomSession \u2192 Q in Connect AI Agent', Block3: 'UpdateContactData (store session ARN)', Block4: 'ConnectParticipantWithLexBot' },
+    nodes: ['connect', 'agent'],
+    edges: [{ edge: 'connect-agent', kind: 'ctrl' }],
+    packets: [{ edge: 'connect-agent', kind: 'ctrl', count: 1 }],
   },
   {
-    title: 'Chime triggers a Lambda: "what do I do?"',
-    body: 'Chime fires off our <span class="hl">SMA Lambda</span> — a tiny function that receives every new call event. Think of it as the "receptionist" that decides how to route the call.',
-    meta: { Function: 'sma-handler', Runtime: 'Node.js 24', Event: 'NEW_INBOUND_CALL' },
-    nodes: ['chimeVC', 'sma'],
-    edges: [{ edge: 'chime-sma', kind: 'ctrl' }],
-    packets: [{ edge: 'chime-sma', kind: 'ctrl', count: 1 }],
+    title: 'Contact Flow hands call to Amazon Lex V2',
+    body: 'The Contact Flow connects the caller to the <span class="hl">Amazon Lex V2 bot</span> via the <code>ConnectParticipantWithLexBot</code> block. The Lex bot uses the <span class="hl">Nova Sonic generative engine</span> for real-time speech-to-speech \u2014 no text-to-speech conversion, just pure bidirectional voice streaming.',
+    meta: { Engine: 'generative (Nova Sonic)', Voice: 'Matthew', Intent: 'AMAZON.QInConnectIntent', 'Session TTL': '300s' },
+    nodes: ['connect', 'lex'],
+    edges: [{ edge: 'connect-lex', kind: 'audioIn' }],
+    packets: [{ edge: 'connect-lex', kind: 'audioIn', count: 2 }],
   },
   {
-    title: 'Lambda pre-warms the agent — beats cold start',
-    body: 'BEFORE responding to Chime, the Lambda <span class="hl">awaits</span> a SigV4-signed <span class="hl">POST /invocations</span> warmup request to <span class="hl">Amazon Bedrock AgentCore Runtime</span>. The deterministic session id pins the request to a specific microVM (microVM stickiness), and the agent runs the expensive setup work — <span class="hl">prompt rendering, customer lookup, Nova Sonic stream open, MCP tool discovery, agent priming</span> — INSIDE this 1-2 second window. The phone is still ringing, the caller is still engaged. By the time the bridged INVITE arrives at the SIP gateway, the agent is ready to speak.',
-    meta: { Method: 'POST /invocations', Header: 'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: pstn-<hex>', Body: '{"type":"warmup","raw_from":...,"voice_id":"tiffany"}', Effect: 'agent stashes warm context in microVM-local cache keyed by session_id' },
-    nodes: ['sma', 'runtime', 'renderer', 'customers', 'novaSonic'],
-    edges: [
-      { edge: 'sma-runtime', kind: 'prompt' },
-      { edge: 'runtime-renderer', kind: 'prompt' },
-      { edge: 'renderer-customers', kind: 'db' },
-      { edge: 'runtime-nova', kind: 'ctrl' },
-    ],
-    packets: [
-      { edge: 'sma-runtime', kind: 'prompt', count: 1, delay: 0 },
-      { edge: 'runtime-renderer', kind: 'prompt', count: 1, delay: 350 },
-      { edge: 'renderer-customers', kind: 'db', count: 1, delay: 600 },
-      { edge: 'runtime-nova', kind: 'ctrl', count: 1, delay: 900 },
-    ],
+    title: 'Lex routes conversation to Q in Connect AI Agent',
+    body: 'The <code>AMAZON.QInConnectIntent</code> routes all conversation turns to the <span class="hl">Q in Connect ORCHESTRATION AI Agent</span>. Lex handles the voice layer; the AI Agent handles all reasoning and tool calls.',
+    meta: { Intent: 'AMAZON.QInConnectIntent', 'Agent type': 'ORCHESTRATION', Protocol: 'Q in Connect API' },
+    nodes: ['lex', 'agent'],
+    edges: [{ edge: 'lex-agent', kind: 'ctrl' }],
+    packets: [{ edge: 'lex-agent', kind: 'ctrl', count: 1 }],
   },
   {
-    title: 'Warmup done — Lambda tells Chime to bridge the call',
-    body: 'With the agent warmed and waiting, the Lambda finally returns a <code>CallAndBridge</code> action to Chime, instructing it to forward the call to the SIP gateway. The action carries a <span class="hl">custom SIP header</span> <code>X-Session-Id</code> with the same deterministic identifier — Chime relays the header verbatim onto the bridged INVITE so the SIP gateway knows which warmed microVM to attach to.',
-    meta: { Action: 'CallAndBridge', Target: 'sip-gateway-nlb-xxxxxxxxxxxxxxxx.elb.amazonaws.com:5060', SipHeader: 'X-Session-Id: pstn-<hex>' },
-    nodes: ['chimeVC', 'sma'],
-    edges: [{ edge: 'sma-chime', kind: 'ctrl' }],
-    packets: [{ edge: 'sma-chime', kind: 'ctrl', count: 1 }],
+    title: 'AI Agent reasons with Claude Haiku 4.5',
+    body: 'The <span class="hl">ORCHESTRATION AI Agent</span> uses <span class="hl">Claude Haiku 4.5</span> (model ID <code>us.anthropic.claude-haiku-4-5-20251001-v1:0</code>) to understand the caller\'s intent. It greets the caller, asks for their location if needed, and decides which tools to call.',
+    meta: { Model: 'Claude Haiku 4.5', 'Model ID': 'us.anthropic.claude-haiku-4-5-20251001-v1:0', Format: 'ORCHESTRATION / MESSAGES', Language: 'English' },
+    nodes: ['agent', 'claude'],
+    edges: [{ edge: 'agent-claude', kind: 'prompt' }],
+    packets: [{ edge: 'agent-claude', kind: 'prompt', count: 1 }],
   },
   {
-    title: 'Chime sends a SIP INVITE',
-    body: 'Chime sends a <span class="hl">SIP INVITE</span> — the SIP message that initiates a voice call. It goes over TCP port 5060 to our <span class="hl">Public Network Load Balancer</span>, which forwards it to one of our Fargate tasks. The INVITE carries the <code>X-Session-Id</code> custom header that the SMA Lambda set on the CallAndBridge.',
-    meta: { Protocol: 'SIP/TCP:5060', From: '+12125550100', To: '+18005550100', 'X-Session-Id': 'pstn-<hex> (from SMA)' },
-    nodes: ['chimeVC', 'nlb', 'drachtio'],
-    edges: [
-      { edge: 'chime-nlb', kind: 'sip' },
-      { edge: 'nlb-drachtio', kind: 'sip' },
-    ],
-    packets: [
-      { edge: 'chime-nlb', kind: 'sip', count: 1, delay: 0 },
-      { edge: 'nlb-drachtio', kind: 'sip', count: 1, delay: 300 },
-    ],
+    title: 'AI Agent calls tools via AgentCore Gateway (MCP)',
+    body: 'The AI Agent calls tools \u2014 <code>GeocodeAddress</code>, <code>GetNearestLocations</code>, <code>GetMenu</code>, <code>AddToCart</code>, <code>GetCart</code>, <code>PlaceOrder</code> \u2014 through the <span class="hl">Amazon Bedrock AgentCore Gateway</span> using the <span class="hl">Model Context Protocol (MCP)</span>. The gateway validates the caller\'s JWT against the Connect JWKS endpoint.',
+    meta: { Protocol: 'MCP (Model Context Protocol)', Auth: 'CUSTOM_JWT (Connect instance JWKS)', 'Tool count': '10 MCP + 2 RETURN_TO_CONTROL' },
+    nodes: ['agent', 'mcpGw'],
+    edges: [{ edge: 'agent-mcp', kind: 'tool' }],
+    packets: [{ edge: 'agent-mcp', kind: 'tool', count: 2 }],
   },
   {
-    title: 'drachtio accepts the call, picks an RTP port',
-    body: 'Inside the Fargate container, <span class="hl">drachtio-server</span> (our SIP engine) accepts the INVITE. The Node bridge allocates a free UDP port from its pool (ports <code>16000</code>-<code>16048</code>) to receive the caller\'s voice.',
-    meta: { Container: 'drachtio-sip-gateway', PortPicked: '16003', PortRange: '16000-16048 (49 slots)' },
-    nodes: ['drachtio', 'rtpBridge'],
-    edges: [{ edge: 'drachtio-bridge', kind: 'ctrl' }],
-    packets: [{ edge: 'drachtio-bridge', kind: 'ctrl', count: 1 }],
-    badge: { node: 'rtpBridge', text: 'bound :16003' },
-  },
-  {
-    title: '200 OK: "send audio to my public IP, send SIP to the NLB"',
-    body: 'drachtio answers Chime with <code>200 OK</code>. The response has <b>two different addresses</b>, one per plane: the <span class="hl">SDP answer</span> says <code>c=IN IP4 &lt;task-public-ip&gt;</code> so Chime sends <b>media</b> direct to the task, while the <span class="hl">Contact header</span> advertises the <b>NLB\'s public IP</b> so Chime routes follow-up <b>signaling</b> (ACK, BYE, re-INVITE) through the load balancer. This two-IP split is what lets the task security group lock TCP/5060 to the NLB while still letting thousands of media flows land direct.',
-    meta: { 'SDP c= (media)': 'IN IP4 198.51.100.42', 'Contact (signaling)': 'sip:203.0.113.17:5060 (NLB EIP)', 'SDP m=': 'audio 16003 RTP/AVP 0 101' },
-    nodes: ['drachtio', 'nlb', 'chimeVC'],
-    edges: [
-      { edge: 'drachtio-nlb', kind: 'sip' },
-      { edge: 'nlb-chime', kind: 'sip' },
-    ],
-    packets: [
-      { edge: 'drachtio-nlb', kind: 'sip', count: 1, delay: 0 },
-      { edge: 'nlb-chime', kind: 'sip', count: 1, delay: 300 },
-    ],
-  },
-  {
-    title: 'Chime sends audio DIRECTLY to the container',
-    body: 'Chime now streams the caller\'s voice as <span class="hl">RTP packets</span> (50 per second, one every 20ms) straight to the task\'s public IP on UDP. <b>Under r7, the NLB handles only TCP/5060 signaling — RTP media flows directly to task public IPs, bypassing the load balancer</b> — this is what lets us scale to thousands of calls.',
-    meta: { Codec: 'G.711 μ-law (PCMU)', Rate: '50 packets/sec', 'Chime source CIDRs': 'see AWS Chime SDK VC docs' },
-    nodes: ['chimeVC', 'rtpBridge'],
-    edges: [{ edge: 'chime-rtpbridge', kind: 'audioIn' }],
-    packets: [{ edge: 'chime-rtpbridge', kind: 'audioIn', count: 8, delay: 0, spread: 1800 }],
-  },
-  {
-    title: 'Bridge opens a WebSocket pinned to the same session id',
-    body: 'The Node bridge reads the <code>X-Session-Id</code> SIP header from the bridged INVITE, signs a URL with <span class="hl">AWS SigV4</span>, and opens a WebSocket to <span class="hl">Amazon Bedrock AgentCore Runtime</span>. The session id rides on TWO query params: the <span class="hl">official routing param</span> tells AgentCore\'s edge to route the WebSocket to the warmed microVM (microVM stickiness), and the <span class="hl">custom-prefix param</span> is forwarded into the container as an HTTP header so the agent code can read it. The WebSocket lands on the warm cache and the agent attaches to the pre-built call context in milliseconds — <b>no auth message, no cold start</b>.',
-    meta: { Auth: 'AWS SigV4 query-string', URL: 'wss://<runtime-id>.bedrock-agentcore.us-east-1.amazonaws.com/ws', 'Routing param': 'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id (consumed by edge)', 'Custom-prefix param': 'X-Amzn-Bedrock-AgentCore-Runtime-Custom-Session-Id (forwarded as header)' },
-    nodes: ['rtpBridge', 'runtime'],
-    edges: [
-      { edge: 'bridge-runtime', kind: 'ctrl' },
-    ],
-    packets: [
-      { edge: 'bridge-runtime', kind: 'ctrl', count: 2, delay: 0 },
-    ],
-  },
-  {
-    title: 'Agent attaches to the pre-warmed context',
-    body: 'Because the warmup POST already ran the prompt resolution, customer lookup, MCP tool discovery, and Nova Sonic stream open, the <span class="hl">/ws</span> handler does a single <code>_warm_sessions.pop(session_id)</code> and starts streaming audio immediately. The pre-built BidiAgent and the open Nova 2 Sonic bidi stream are both already alive — the agent just hooks the WebSocket in and starts paced reads + writes.',
-    meta: { 'Cache lookup': 'O(ms)', Model: 'amazon.nova-2-sonic-v1:0', Voice: 'tiffany', 'Connected since': 'warmup tick (~1-2s ago)' },
-    nodes: ['runtime', 'novaSonic'],
-    edges: [
-      { edge: 'runtime-nova', kind: 'ctrl' },
-      { edge: 'nova-runtime', kind: 'ctrl' },
-    ],
-    packets: [
-      { edge: 'runtime-nova', kind: 'ctrl', count: 1, delay: 0 },
-      { edge: 'nova-runtime', kind: 'ctrl', count: 1, delay: 350 },
-    ],
-  },
-  {
-    title: 'Nova Sonic greets the caller first',
-    body: 'Because the warmup primed Nova Sonic with a "Hi" message, the model treats the call as already in progress and produces the greeting from the system prompt — for a known caller, something like <i>"Hello Jane, welcome back to Amazing Burgers. Hold on just a second while I pull up your previous orders so I can serve you better."</i> The audio flows DOWN the stack: <span class="hl">Nova Sonic → AgentCore Runtime → WebSocket → Node bridge → direct RTP to Chime → caller\'s phone</span>. The caller hears a friendly voice within milliseconds of answering.',
-    meta: { Trigger: 'agent.send("Hi") during warmup', 'First utterance source': 'system prompt {BUSINESS_NAME} + {CUSTOMER_NAME}', Direction: 'DOWN', Latency: '0 cold-start, ~120ms model-to-ear' },
-    nodes: ['novaSonic', 'runtime', 'rtpBridge', 'chimeVC', 'caller'],
-    edges: [
-      { edge: 'nova-runtime', kind: 'audioOut' },
-      { edge: 'runtime-bridge', kind: 'audioOut' },
-      { edge: 'rtpbridge-chime', kind: 'audioOut' },
-      { edge: 'chime-caller', kind: 'audioOut' },
-    ],
-    packets: [
-      { edge: 'nova-runtime', kind: 'audioOut', count: 3, delay: 0, spread: 1500 },
-      { edge: 'runtime-bridge', kind: 'audioOut', count: 3, delay: 150, spread: 1500 },
-      { edge: 'rtpbridge-chime', kind: 'audioOut', count: 3, delay: 300, spread: 1500 },
-      { edge: 'chime-caller', kind: 'audioOut', count: 3, delay: 450, spread: 1500 },
-    ],
-  },
-  {
-    title: 'Caller speaks — audio flows UP the stack',
-    body: 'The customer responds to the greeting. Their voice travels the full up-path: <span class="hl">phone → Chime → direct RTP to container → Node bridge → WebSocket → AgentCore Runtime → Nova Sonic</span>. Each hop takes milliseconds. Nova Sonic "hears" the caller in near-real-time.',
-    meta: { Latency: '~120ms end-to-end', 'Sample rate': '8 kHz μ-law → 16 kHz L16', Direction: 'UP' },
-    nodes: ['caller', 'chimeVC', 'rtpBridge', 'runtime', 'novaSonic'],
-    edges: [
-      { edge: 'caller-chime', kind: 'audioIn' },
-      { edge: 'chime-rtpbridge', kind: 'audioIn' },
-      { edge: 'bridge-runtime', kind: 'audioIn' },
-      { edge: 'runtime-nova', kind: 'audioIn' },
-    ],
-    packets: [
-      { edge: 'caller-chime', kind: 'audioIn', count: 3, delay: 0, spread: 1500 },
-      { edge: 'chime-rtpbridge', kind: 'audioIn', count: 3, delay: 100, spread: 1500 },
-      { edge: 'bridge-runtime', kind: 'audioIn', count: 3, delay: 200, spread: 1500 },
-      { edge: 'runtime-nova', kind: 'audioIn', count: 3, delay: 300, spread: 1500 },
-    ],
-  },
-  {
-    title: 'Nova Sonic asks the Runtime to use a tool',
-    body: 'Nova Sonic understands the caller asked about the menu. It emits a <span class="hl">tool_use</span> event back to the Runtime. Nova Sonic itself never talks to any tool — <b>the Runtime</b> is the one that calls the <span class="hl">AgentCore Gateway</span> on its behalf, using <span class="hl">MCP</span> (Model Context Protocol).',
-    meta: { 'Tool called': 'qsr-backend-api___GetMenu', Protocol: 'MCP (Model Context Protocol)', Transport: 'HTTP + AWS_IAM' },
-    nodes: ['novaSonic', 'runtime', 'mcpGw'],
-    edges: [
-      { edge: 'nova-runtime', kind: 'tool' },
-      { edge: 'runtime-mcp', kind: 'tool' },
-    ],
-    packets: [
-      { edge: 'nova-runtime', kind: 'tool', count: 1, delay: 0 },
-      { edge: 'runtime-mcp', kind: 'tool', count: 1, delay: 500 },
-    ],
-  },
-  {
-    title: 'MCP Gateway routes to the REST backend',
-    body: 'The <span class="hl">AgentCore MCP Gateway</span> translates the tool call into a REST request against our <span class="hl">API Gateway</span>, which invokes the <span class="hl">GetMenu Lambda</span>, which reads from <span class="hl">DynamoDB</span>. The full round-trip takes ~200ms.',
-    meta: { 'API endpoint': 'GET /menu?locationId=loc-…', 'DDB table': 'Menu', 'Round trip': '~200ms' },
-    nodes: ['mcpGw', 'apiGw', 'lambdas', 'ddbTables'],
+    title: 'AgentCore Gateway routes to REST API and Lambda',
+    body: 'The AgentCore Gateway translates each MCP tool call into an <span class="hl">HTTP request</span> to the <span class="hl">Amazon API Gateway</span> REST API (<code>prod</code> stage, <code>AWS_IAM</code> authorization). API Gateway proxies to the corresponding <span class="hl">AWS Lambda</span> function.',
+    meta: { 'API stage': 'prod', Auth: 'AWS_IAM', 'Lambda runtime': 'Node.js 24.x', Functions: 'GetMenu, AddToCart, GetCart, PlaceOrder, GeocodeAddress, GetNearestLocations\u2026' },
+    nodes: ['mcpGw', 'apiGw', 'lambdas'],
     edges: [
       { edge: 'mcp-api', kind: 'tool' },
       { edge: 'api-lambdas', kind: 'tool' },
-      { edge: 'lambdas-ddb', kind: 'db' },
     ],
     packets: [
       { edge: 'mcp-api', kind: 'tool', count: 1, delay: 0 },
-      { edge: 'api-lambdas', kind: 'tool', count: 1, delay: 250 },
-      { edge: 'lambdas-ddb', kind: 'db', count: 1, delay: 500 },
+      { edge: 'api-lambdas', kind: 'tool', count: 1, delay: 300 },
     ],
   },
   {
-    title: 'Nova Sonic speaks the tool result back',
-    body: 'With the menu data in hand, Nova Sonic generates a natural voice response and streams it back through the same path as the greeting: <span class="hl">Nova Sonic → AgentCore Runtime → WebSocket → Node bridge → direct RTP to Chime → caller\'s phone</span>. The customer hears the menu, picks an item, and the conversation continues — every subsequent turn loops through steps 13-16.',
-    meta: { Output: 'Amazon Nova 2 Sonic · tiffany voice', 'Sample rate': '16 kHz L16 → 8 kHz μ-law', Direction: 'DOWN', 'Conversation loop': 'steps 13-16 repeat per turn' },
-    nodes: ['novaSonic', 'runtime', 'rtpBridge', 'chimeVC', 'caller'],
+    title: 'Lambda reads/writes DynamoDB and Location Service',
+    body: 'Lambda functions read and write <span class="hl">Amazon DynamoDB</span> tables (Menu, Carts, Orders, Customers, Locations) and call <span class="hl">Amazon Location Service</span> for geocoding (<code>SearchPlaceIndexForText</code>) and nearest-restaurant lookup (<code>SearchPlaceIndexForPosition</code>).',
+    meta: { Tables: 'Menu \u00b7 Carts \u00b7 Orders \u00b7 Customers \u00b7 Locations', 'Location ops': 'SearchPlaceIndexForText, SearchPlaceIndexForPosition', 'Carts TTL': '24 hours', 'Cart isolation': 'per-caller partition key' },
+    nodes: ['lambdas', 'ddb', 'location'],
     edges: [
-      { edge: 'nova-runtime', kind: 'audioOut' },
-      { edge: 'runtime-bridge', kind: 'audioOut' },
-      { edge: 'rtpbridge-chime', kind: 'audioOut' },
-      { edge: 'chime-caller', kind: 'audioOut' },
+      { edge: 'lambdas-ddb', kind: 'db' },
+      { edge: 'lambdas-location', kind: 'db' },
     ],
     packets: [
-      { edge: 'nova-runtime', kind: 'audioOut', count: 4, delay: 0, spread: 2000 },
-      { edge: 'runtime-bridge', kind: 'audioOut', count: 4, delay: 150, spread: 2000 },
-      { edge: 'rtpbridge-chime', kind: 'audioOut', count: 4, delay: 300, spread: 2000 },
-      { edge: 'chime-caller', kind: 'audioOut', count: 4, delay: 450, spread: 2000 },
+      { edge: 'lambdas-ddb', kind: 'db', count: 2, delay: 0 },
+      { edge: 'lambdas-location', kind: 'db', count: 1, delay: 300 },
+    ],
+  },
+  {
+    title: 'Order confirmed \u2014 agent fires Complete, call ends',
+    body: 'After the order is placed, the tool result flows back: <span class="hl">Lambda \u2192 API Gateway \u2192 AgentCore Gateway \u2192 Q in Connect AI Agent \u2192 Lex \u2192 Amazon Connect \u2192 Phone Customer</span>. The AI Agent fires the <span class="hl">Complete</span> RETURN_TO_CONTROL tool. Q in Connect sets <code>$.Lex.SessionAttributes.Tool = "Complete"</code>. The Contact Flow disconnects the call.',
+    meta: { Tool: 'Complete (RETURN_TO_CONTROL)', 'Session attr': '$.Lex.SessionAttributes.Tool = Complete', 'Contact flow block': 'Compare \u2192 DisconnectParticipant', Note: 'Escalate path also disconnects in demo; wire to queue in production' },
+    nodes: ['lambdas', 'apiGw', 'mcpGw', 'agent', 'lex', 'connect', 'caller'],
+    edges: [
+      { edge: 'lambdas-api-ret', kind: 'audioOut' },
+      { edge: 'api-mcp-ret',     kind: 'audioOut' },
+      { edge: 'mcp-agent-ret',   kind: 'audioOut' },
+      { edge: 'agent-lex-ret',   kind: 'audioOut' },
+      { edge: 'lex-connect-ret', kind: 'audioOut' },
+      { edge: 'connect-caller-ret', kind: 'audioOut' },
+    ],
+    packets: [
+      { edge: 'lambdas-api-ret', kind: 'audioOut', count: 1, delay: 0 },
+      { edge: 'api-mcp-ret',     kind: 'audioOut', count: 1, delay: 300 },
+      { edge: 'mcp-agent-ret',   kind: 'audioOut', count: 1, delay: 600 },
+      { edge: 'agent-lex-ret',   kind: 'audioOut', count: 1, delay: 900 },
+      { edge: 'lex-connect-ret', kind: 'audioOut', count: 1, delay: 1200 },
+      { edge: 'connect-caller-ret', kind: 'audioOut', count: 1, delay: 1500 },
     ],
   },
 ];
-
-// ═══════════════════════════════════════════════════════════════════
-// ICONS — real AWS brand colors. Small, dense, readable at 28px.
-// ═══════════════════════════════════════════════════════════════════
 
 const ICONS = {
   phone: `<svg viewBox="0 0 32 32"><rect x="2" y="2" width="28" height="28" rx="6" fill="#3b4966"/><path d="M10 8l3 3-2 2c.5 2 2 4 4 4l2-2 3 3-2 2c-.5 1.5-3.5 1.5-6 0-2.5-1.5-5.5-4.5-6-7 0-1 0-3.5 4-5z" fill="#fff"/></svg>`,
@@ -728,12 +562,9 @@ const ICONS = {
   location: `<svg viewBox="0 0 32 32"><rect x="2" y="2" width="28" height="28" rx="6" fill="#7aa116"/><path d="M16 8c-3.3 0-6 2.7-6 6 0 4.5 6 12 6 12s6-7.5 6-12c0-3.3-2.7-6-6-6z" fill="#fff"/><circle cx="16" cy="14" r="2.2" fill="#7aa116"/></svg>`,
 };
 
-// Accessible labels for each ICONS entry. Used by `renderIcon` to inject
-// role="img" + <title> into the SVG so screen readers announce a service
-// name instead of skipping the decorative graphic.
 const ICON_LABELS = {
   phone: 'Phone caller',
-  chime: 'Amazon Chime SDK Voice Connector',
+  chime: 'Amazon Connect',
   lambda: 'AWS Lambda',
   dynamodb: 'Amazon DynamoDB',
   apigw: 'Amazon API Gateway',
@@ -745,8 +576,6 @@ const ICON_LABELS = {
   location: 'Amazon Location Service',
 };
 
-// Wrap an ICONS entry with role="img" and a <title> so the SVG announces
-// itself to assistive tech. Falls back to "icon" if no label is registered.
 function renderIcon(iconKey) {
   const svg = ICONS[iconKey] || '';
   if (!svg) return '';
@@ -756,9 +585,6 @@ function renderIcon(iconKey) {
     .replace('>', `><title>${label}</title>`);
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// Packet-color lookup, mapped from step's `kind` to CSS var.
-// ═══════════════════════════════════════════════════════════════════
 const PACKET_COLORS = {
   sip:      'var(--sip)',
   audioIn:  'var(--audio-in)',
@@ -769,11 +595,6 @@ const PACKET_COLORS = {
   prompt:   'var(--prompt)',
 };
 
-// ═══════════════════════════════════════════════════════════════════
-// RENDERING — build the static topology once, then per-step updates
-// only change activation state.
-// ═══════════════════════════════════════════════════════════════════
-
 const svg = document.getElementById('svg');
 const clustersG = document.getElementById('clusters');
 const edgesBaseG = document.getElementById('edgesBase');
@@ -782,15 +603,12 @@ const packetsG = document.getElementById('packets');
 const nodeLayer = document.getElementById('nodeLayer');
 const tooltipEl = document.getElementById('tooltip');
 
-// Map: stage pixel coords, convert to viewport coords (we use viewBox-native)
 function nodeCenter(n) { return { x: n.x + n.w / 2, y: n.y + n.h / 2 }; }
 
-// Convert SVG viewBox coords to screen pixel coords for HTML overlay placement.
 function svgToScreen(x, y) {
   const stage = document.getElementById('stage');
   const rect = stage.getBoundingClientRect();
   const vb = svg.viewBox.baseVal;
-  // maintain aspect ratio (xMidYMid meet)
   const scale = Math.min(rect.width / vb.width, rect.height / vb.height);
   const offX = (rect.width - vb.width * scale) / 2;
   const offY = (rect.height - vb.height * scale) / 2;
@@ -801,7 +619,6 @@ function svgToScreen(x, y) {
   };
 }
 
-// Clusters
 for (const c of CLUSTERS) {
   const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
   rect.setAttribute('x', c.x); rect.setAttribute('y', c.y);
@@ -825,7 +642,6 @@ for (const c of CLUSTERS) {
   clustersG.appendChild(label);
 }
 
-// Compute SVG path `d` for an edge. `curve` controls vertical bow.
 function edgePath(from, to, curve) {
   const a = nodeCenter(NODES[from]);
   const b = nodeCenter(NODES[to]);
@@ -834,9 +650,6 @@ function edgePath(from, to, curve) {
   return `M ${a.x} ${a.y} Q ${mx} ${my} ${b.x} ${b.y}`;
 }
 
-// Build edges. Each edge has a muted "base" line that's always visible
-// (so people can read the topology) and a "hot" line that pulses when
-// active. When a hot is on, we hide the base so they don't double up.
 const edgeHotElements = {};
 const edgeBaseElements = {};
 for (const e of EDGES) {
@@ -861,7 +674,6 @@ for (const e of EDGES) {
   edgeHotElements[e.id] = hot;
 }
 
-// Build nodes (HTML overlays for the icon + label).
 const nodeElements = {};
 function renderNodes() {
   nodeLayer.innerHTML = '';
@@ -898,16 +710,11 @@ function moveTooltip(ev) {
 }
 function hideTooltip() { tooltipEl.classList.remove('show'); }
 
-// ═══════════════════════════════════════════════════════════════════
-// Packet animation — small glowing dot traverses an edge's path.
-// ═══════════════════════════════════════════════════════════════════
-
 function firePacket(edgeId, kindColor, durationMs) {
   const pathEl = edgeHotElements[edgeId];
   if (!pathEl) return;
   const pathD = pathEl.getAttribute('d');
 
-  // Create a hidden measure path so we can use getPointAtLength.
   const measure = document.createElementNS('http://www.w3.org/2000/svg', 'path');
   measure.setAttribute('d', pathD);
   measure.style.visibility = 'hidden';
@@ -936,17 +743,9 @@ function firePacket(edgeId, kindColor, durationMs) {
   requestAnimationFrame(tick);
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// Step application
-// ═══════════════════════════════════════════════════════════════════
-
 let currentStep = -1;
 let autoPlayTimer = null;
 let autoPlaying = false;
-// Auto-play speed is driven by the slider. The slider value (1-10)
-// maps to a "speed multiplier" displayed to the user as 0.33×-3.33×.
-// The actual interval is BASE / multiplier. At slider=3 (default) the
-// multiplier is 1.0× → interval is BASE_AUTOPLAY_MS = 3500 ms.
 const BASE_AUTOPLAY_MS = 3500;
 function currentSpeedMultiplier() {
   const slider = document.getElementById('speedSlider');
@@ -960,7 +759,6 @@ function applyStep(idx) {
   currentStep = idx;
   const step = STEPS[idx];
 
-  // Update sidebar text
   document.getElementById('stepCounter').textContent = `STEP ${idx + 1} OF ${STEPS.length}`;
   document.getElementById('stepTitle').textContent = step.title;
   document.getElementById('stepBody').innerHTML = step.body;
@@ -972,7 +770,6 @@ function applyStep(idx) {
 
   document.getElementById('progressInner').style.width = ((idx + 1) / STEPS.length * 100) + '%';
 
-  // Update step list active state + auto-scroll active row into view.
   let activeRow = null;
   for (const row of document.querySelectorAll('.step-row')) {
     const rowIdx = Number(row.dataset.idx);
@@ -984,13 +781,11 @@ function applyStep(idx) {
     activeRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
-  // Update node activation
   const activeSet = new Set(step.nodes);
   for (const [key, el] of Object.entries(nodeElements)) {
     el.classList.toggle('active', activeSet.has(key));
   }
 
-  // Update edge activation (hot lines + hide base under them)
   const activeEdges = new Set((step.edges || []).map((e) => e.edge));
   for (const [id, el] of Object.entries(edgeHotElements)) {
     el.classList.toggle('on', activeEdges.has(id));
@@ -999,7 +794,6 @@ function applyStep(idx) {
     el.classList.toggle('live', activeEdges.has(id));
   }
 
-  // Fire packets. Stagger based on their `delay` and `spread` hints.
   for (const p of step.packets || []) {
     const count = p.count || 1;
     const spread = p.spread || 0;
@@ -1011,7 +805,6 @@ function applyStep(idx) {
     }
   }
 
-  // Button state
   document.getElementById('prevStep').disabled = (idx === 0);
   document.getElementById('nextStep').disabled = (idx === STEPS.length - 1);
 }
@@ -1032,8 +825,6 @@ function buildStepsList() {
 function startAutoPlay() {
   autoPlaying = true;
   document.getElementById('autoPlay').innerHTML = 'Pause';
-  // Advance immediately on click so the user sees action right away,
-  // then continue stepping forward at the slider-driven interval.
   if (currentStep < STEPS.length - 1) {
     applyStep(currentStep + 1);
   }
@@ -1050,9 +841,6 @@ function stopAutoPlay() {
   document.getElementById('autoPlay').innerHTML = 'Auto-play';
   if (autoPlayTimer) { clearInterval(autoPlayTimer); autoPlayTimer = null; }
 }
-// When the user drags the slider while auto-play is running, swap the
-// interval in-place so the change takes effect immediately rather
-// than waiting for the next applyStep tick.
 function reapplyAutoplayInterval() {
   if (!autoPlaying || !autoPlayTimer) return;
   clearInterval(autoPlayTimer);
@@ -1064,10 +852,6 @@ function reapplyAutoplayInterval() {
     applyStep(currentStep + 1);
   }, currentAutoplayMs());
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// Wire up controls
-// ═══════════════════════════════════════════════════════════════════
 
 document.getElementById('prevStep').addEventListener('click', () => {
   stopAutoPlay();
@@ -1088,16 +872,13 @@ document.getElementById('autoPlay').addEventListener('click', () => {
   }
 });
 
-// Speed-slider wiring. Update the visible multiplier on every change,
-// and if auto-play is running rebuild the interval immediately so the
-// new speed takes effect without waiting for the next tick.
 (function initSpeedSlider() {
   const slider = document.getElementById('speedSlider');
   const valueEl = document.getElementById('speedValue');
   if (!slider || !valueEl) return;
   const update = () => {
     const m = currentSpeedMultiplier();
-    valueEl.textContent = m.toFixed(1).replace(/\.0$/, '') + '×';
+    valueEl.textContent = m.toFixed(1).replace(/\.0$/, '') + '\u00d7';
     reapplyAutoplayInterval();
   };
   slider.addEventListener('input', update);
@@ -1118,7 +899,6 @@ window.addEventListener('keydown', (ev) => {
 
 window.addEventListener('resize', () => renderNodes());
 
-// Initial render
 renderNodes();
 buildStepsList();
 applyStep(0);

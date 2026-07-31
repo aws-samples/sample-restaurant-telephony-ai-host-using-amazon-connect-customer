@@ -13,20 +13,20 @@
   "devDependencies": {
     "@types/jest": "^30",
     "@types/node": "^24.10.1",
-    "aws-cdk": "^2.1125.0",
-    "esbuild": "^0.27.3",
+    "aws-cdk": "2.1125.0",
+    "esbuild": "0.27.7",
     "jest": "^30",
     "ts-jest": "^29",
     "ts-node": "^10.9.2",
     "typescript": "~5.9.3"
   },
   "dependencies": {
-    "@aws-sdk/client-api-gateway": "^3.992.0",
-    "@aws-sdk/client-bedrock-agentcore-control": "^3.992.0",
-    "@aws-sdk/client-iam": "^3.992.0",
-    "aws-cdk-lib": "^2.257.0",
+    "@aws-sdk/client-api-gateway": "3.1052.0",
+    "@aws-sdk/client-bedrock-agentcore-control": "3.1052.0",
+    "@aws-sdk/client-iam": "3.1052.0",
+    "aws-cdk-lib": "2.257.0",
     "cdk-nag": "^2",
-    "constructs": "^10.0.0"
+    "constructs": "10.6.0"
   },
   "license": "MIT-0"
 }

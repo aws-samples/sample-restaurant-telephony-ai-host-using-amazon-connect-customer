@@ -11,6 +11,7 @@ import {
   BedrockAgentCoreControlClient,
   CreateGatewayCommand,
   GetGatewayCommand,
+  UpdateGatewayCommand,
   DeleteGatewayCommand,
   ListGatewaysCommand,
   CreateGatewayTargetCommand,
@@ -28,8 +29,12 @@ import {
   PutRolePolicyCommand,
   DeleteRolePolicyCommand,
   ListRolePoliciesCommand,
-  ListAttachedRolePoliciesCommand,
+  CreatePolicyCommand,
+  GetPolicyCommand,
+  AttachRolePolicyCommand,
   DetachRolePolicyCommand,
+  ListAttachedRolePoliciesCommand,
+  DeletePolicyCommand,
 } from '@aws-sdk/client-iam';
 
 import {
@@ -113,13 +118,20 @@ async function createGateway(props) {
   const stage = props.Stage;
   const region = props.Region;
   const accountId = props.AccountId;
+  // When ConnectInstanceUrl is provided, the gateway uses CUSTOM_JWT auth so that
+  // Amazon Connect can invoke it as an MCP tool server. When absent, it falls back
+  // to AWS_IAM for direct agent/SDK access.
+  const connectInstanceUrl = props.ConnectInstanceUrl || '';
+  const useJwtAuth = !!connectInstanceUrl;
 
-  console.log(`Creating Gateway: ${gatewayName}`);
+  console.log(`Creating Gateway: ${gatewayName}, auth: ${useJwtAuth ? 'CUSTOM_JWT' : 'AWS_IAM'}`);
 
-  // Step 1: Create IAM role
-  const roleName = `${gatewayName}-service-role`;
-  const apiGatewayArn = `arn:aws:execute-api:${region}:${accountId}:${apiGatewayId}/${stage}/*/*`;
-  const roleArn = await createGatewayServiceRole(roleName, apiGatewayArn);
+  // Step 1: Create the gateway service role with correct path /service-role/ and
+  // trust policy matching the working account's role exactly.
+  // The role name uses the gateway name prefix with a wildcard in the trust condition
+  // so it works before the exact gateway ID is known.
+  const roleName = `AmazonBedrockAgentCoreGatewayServiceRole-${gatewayName}`;
+  const roleArn = await createGatewayServiceRole(roleName, gatewayName, region, accountId);
 
   // Wait for IAM propagation
   console.log('Waiting for IAM role propagation...');
@@ -133,31 +145,46 @@ async function createGateway(props) {
   const { toolFilters, toolOverrides } = parseOpenApiSchema(schema);
   console.log(`Generated ${toolFilters.length} tool filters and ${toolOverrides.length} tool overrides`);
 
-  // Step 4: Create Gateway
+  // Step 4: Create Gateway — roleArn is mandatory.
   console.log('Creating AgentCore Gateway...');
   let gatewayId;
+  let gatewayUrl;
+
+  const createParams = {
+    name: gatewayName,
+    description,
+    authorizerType: useJwtAuth ? 'CUSTOM_JWT' : 'AWS_IAM',
+    protocolType: 'MCP',
+    protocolConfiguration: {
+      mcp: {
+        supportedVersions: ['2025-03-26'],
+        instructions: description,
+      },
+    },
+    roleArn,
+    exceptionLevel: 'DEBUG',
+  };
+
+  if (useJwtAuth) {
+    const discoveryUrl = `${connectInstanceUrl}/.well-known/openid-configuration`;
+    createParams.authorizerConfiguration = {
+      customJWTAuthorizer: {
+        discoveryUrl,
+        allowedAudience: ['placeholder'],  // gateway ID not known yet — updated after creation
+        // allowedClients intentionally empty — per workshop setup
+      },
+    };
+  }
 
   try {
-    const resp = await agentcoreClient.send(new CreateGatewayCommand({
-      name: gatewayName,
-      description,
-      authorizerType: 'AWS_IAM',
-      protocolType: 'MCP',
-      protocolConfiguration: {
-        mcp: {
-          supportedVersions: ['2025-03-26'],
-          searchType: 'SEMANTIC',
-          instructions: description,
-        },
-      },
-      roleArn,
-      exceptionLevel: 'DEBUG',
-    }));
-
+    const resp = await agentcoreClient.send(new CreateGatewayCommand(createParams));
     gatewayId = resp.gatewayId || resp.gatewayIdentifier;
     if (!gatewayId) throw new Error(`Could not extract gateway ID from response`);
-    console.log(`Gateway created: ${gatewayId}`);
-
+    // CreateGateway response returns URL with /mcp suffix — use this directly.
+    // GetGateway API currently drops the /mcp suffix, causing AppIntegrations
+    // createApplication to fail validation. Capture from CreateGateway response.
+    gatewayUrl = resp.gatewayUrl;
+    console.log(`Gateway created: ${gatewayId}, URL: ${gatewayUrl}`);
   } catch (e) {
     if (e.name === 'ConflictException') {
       console.log(`Gateway ${gatewayName} already exists, retrieving...`);
@@ -165,29 +192,59 @@ async function createGateway(props) {
       const existing = (listResp.items || []).find(g => g.name === gatewayName);
       if (!existing) throw new Error(`Gateway ${gatewayName} exists but could not be found`);
       gatewayId = existing.gatewayId || existing.gatewayIdentifier;
-      console.log(`Using existing gateway: ${gatewayId}`);
+      gatewayUrl = existing.gatewayUrl;  // from list response
+      console.log(`Using existing gateway: ${gatewayId}, URL: ${gatewayUrl}`);
     } else {
       throw e;
     }
   }
 
-  // Fetch gateway details to get URL
-  console.log('Fetching gateway details...');
-  await sleep(2000);
-  const getResp = await agentcoreClient.send(new GetGatewayCommand({ gatewayIdentifier: gatewayId }));
-  const gatewayUrl = getResp.gatewayUrl;
+  // Ensure URL has /mcp suffix — normalize in case list response omits it.
+  if (gatewayUrl && !gatewayUrl.endsWith('/mcp')) {
+    gatewayUrl = `${gatewayUrl}/mcp`;
+  }
   if (!gatewayUrl) throw new Error('Could not extract gateway URL');
-  console.log(`Gateway URL: ${gatewayUrl}`);
+  console.log(`Gateway URL (normalized): ${gatewayUrl}`);
 
-  // Wait for gateway to be ready
+  // Wait for gateway READY before updating JWT audience.
+  // Also attach the base policy now that we have the real gateway ID — scope it
+  // to the exact gateway ARN (matching what the working account's managed policy does).
   await waitForGatewayReady(gatewayId);
+  await attachGatewayBasePolicy(roleName, gatewayId, region, accountId);
+
+  if (useJwtAuth) {
+    console.log(`Updating JWT allowed audience to gateway ID: ${gatewayId}`);
+    const discoveryUrl = `${connectInstanceUrl}/.well-known/openid-configuration`;
+    await agentcoreClient.send(new UpdateGatewayCommand({
+      gatewayIdentifier: gatewayId,
+      name: gatewayName,
+      roleArn,
+      protocolType: 'MCP',
+      protocolConfiguration: {
+        mcp: {
+          supportedVersions: ['2025-03-26'],
+          instructions: description,
+        },
+      },
+      authorizerType: 'CUSTOM_JWT',
+      authorizerConfiguration: {
+        customJWTAuthorizer: {
+          discoveryUrl,
+          allowedAudience: [gatewayId],
+        },
+      },
+    }));
+    console.log(`JWT audience updated to: ${gatewayId}`);
+    // Wait for READY again after the update (gateway enters UPDATING state during update).
+    await waitForGatewayReady(gatewayId);
+  }
 
   // Step 5: Create Gateway Target
   console.log('Creating Gateway Target...');
   const targetPayload = {
     gatewayIdentifier: gatewayId,
-    name: 'qsr-backend-api',
-    description: 'QSR Backend API Lambda functions exposed as MCP tools',
+    name: 'qsr-restaurant-api',
+    description: 'Restaurant ordering API tools',
     targetConfiguration: {
       mcp: {
         apiGateway: {
@@ -220,13 +277,13 @@ async function createGateway(props) {
 
   await waitForTargetReady(gatewayId, targetId);
 
-  const gatewayArn = `arn:aws:bedrock:${region}:${accountId}:agent-gateway/${gatewayId}`;
+  const gatewayReturnArn = `arn:aws:bedrock:${region}:${accountId}:agent-gateway/${gatewayId}`;
   console.log(`Gateway deployment complete: ${gatewayUrl}`);
 
   return {
     gatewayId,
     gatewayUrl,
-    gatewayArn,
+    gatewayArn: gatewayReturnArn,
     gatewayRoleArn: roleArn,
     targetId,
     apiGatewayId,
@@ -252,14 +309,11 @@ async function updateGateway(gatewayId, props) {
 
   // Step 1: Get gateway details
   const getResp = await agentcoreClient.send(new GetGatewayCommand({ gatewayIdentifier: gatewayId }));
-  const gatewayUrl = getResp.gatewayUrl;
+  const rawUrl = getResp.gatewayUrl || '';
+  const gatewayUrl = rawUrl.endsWith('/mcp') ? rawUrl : `${rawUrl}/mcp`;
   const gatewayArn = `arn:aws:bedrock:${region}:${accountId}:agent-gateway/${gatewayId}`;
-  console.log(`Gateway URL: ${gatewayUrl}`);
-
-  // Step 2: Update IAM role policy (in case API Gateway ARN changed)
-  const roleName = `${gatewayName}-service-role`;
-  const apiGatewayArn = `arn:aws:execute-api:${region}:${accountId}:${apiGatewayId}/${stage}/*/*`;
-  const roleArn = await createGatewayServiceRole(roleName, apiGatewayArn);
+  const roleArn = getResp.roleArn;  // reuse the role that was created at gateway create time
+  console.log(`Gateway URL: ${gatewayUrl}, Role: ${roleArn}`);
 
   // Step 3: Update existing target with fresh schema (or create if none exists)
   console.log('Listing existing targets...');
@@ -299,8 +353,8 @@ async function updateGateway(gatewayId, props) {
     await agentcoreClient.send(new UpdateGatewayTargetCommand({
       gatewayIdentifier: gatewayId,
       targetId,
-      name: 'qsr-backend-api',
-      description: 'QSR Backend API Lambda functions exposed as MCP tools',
+      name: 'qsr-restaurant-api',
+      description: 'Restaurant ordering API tools',
       targetConfiguration: targetConfig,
       credentialProviderConfigurations: [
         { credentialProviderType: 'GATEWAY_IAM_ROLE' },
@@ -314,8 +368,8 @@ async function updateGateway(gatewayId, props) {
     console.log('No existing target, creating new one...');
     const targetResp = await agentcoreClient.send(new CreateGatewayTargetCommand({
       gatewayIdentifier: gatewayId,
-      name: 'qsr-backend-api',
-      description: 'QSR Backend API Lambda functions exposed as MCP tools',
+      name: 'qsr-restaurant-api',
+      description: 'Restaurant ordering API tools',
       targetConfiguration: targetConfig,
       credentialProviderConfigurations: [
         { credentialProviderType: 'GATEWAY_IAM_ROLE' },
@@ -345,58 +399,163 @@ async function updateGateway(gatewayId, props) {
   };
 }
 
-// ─── IAM Role ────────────────────────────────────────────────────────────────
+// ─── IAM — Gateway Service Role ──────────────────────────────────────────────
+//
+// Creates a proper service role for the AgentCore Gateway matching exactly
+// what the AWS console auto-creates (confirmed from working account inspection):
+//
+//   Path:        /service-role/
+//   Trust:       bedrock-agentcore.amazonaws.com with SourceAccount + SourceArn conditions
+//   Inline:      ApiGatewayInvokePolicy — execute-api:Invoke on the API Gateway
+//   Managed:     AmazonBedrockAgentCoreGatewayBasePolicyProd_* (created inline here as managed)
+//                  - bedrock-agentcore:GetGateway on the gateway ARN
+//                  - bedrock-agentcore:GetConfigurationBundleVersion on configuration-bundle/*
+//
+// The role is REQUIRED — the CreateGateway API rejects null roleArn.
+// Without the base policy, the gateway returns "Failed to obtain execution role credentials"
+// at runtime because it cannot read its own configuration.
 
-async function createGatewayServiceRole(roleName, apiGatewayArn) {
+async function createGatewayServiceRole(roleName, gatewayName, region, accountId) {
+  const gatewayArnPattern = `arn:aws:bedrock-agentcore:${region}:${accountId}:gateway/${gatewayName}-*`;
+
+  // Trust policy — matches the working account role exactly
   const trustPolicy = JSON.stringify({
     Version: '2012-10-17',
     Statement: [{
+      Sid: 'AmazonBedrockAgentCoreGatewayBasePolicyProd',
       Effect: 'Allow',
       Principal: { Service: 'bedrock-agentcore.amazonaws.com' },
       Action: 'sts:AssumeRole',
+      Condition: {
+        StringEquals: { 'aws:SourceAccount': accountId },
+        ArnLike: { 'aws:SourceArn': gatewayArnPattern },
+      },
     }],
   });
 
-  const policyDocument = JSON.stringify({
-    Version: '2012-10-17',
-    Statement: [{
-      Effect: 'Allow',
-      Action: 'execute-api:Invoke',
-      Resource: apiGatewayArn,
-    }],
-  });
-
+  let roleArn;
   try {
     const resp = await iamClient.send(new CreateRoleCommand({
       RoleName: roleName,
+      Path: '/service-role/',
       AssumeRolePolicyDocument: trustPolicy,
-      Description: 'Service role for AgentCore Gateway',
+      Description: 'Service role for AgentCore Gateway MCP server',
     }));
-    const roleArn = resp.Role.Arn;
+    roleArn = resp.Role.Arn;
     console.log(`Created IAM role: ${roleArn}`);
-
-    await iamClient.send(new PutRolePolicyCommand({
-      RoleName: roleName,
-      PolicyName: 'GatewayServicePolicy',
-      PolicyDocument: policyDocument,
-    }));
-
-    return roleArn;
   } catch (e) {
     if (e.name === 'EntityAlreadyExistsException') {
-      console.log(`Role ${roleName} exists, updating policy...`);
       const resp = await iamClient.send(new GetRoleCommand({ RoleName: roleName }));
-      const roleArn = resp.Role.Arn;
-
-      await iamClient.send(new PutRolePolicyCommand({
-        RoleName: roleName,
-        PolicyName: 'GatewayServicePolicy',
-        PolicyDocument: policyDocument,
-      }));
-
-      return roleArn;
+      roleArn = resp.Role.Arn;
+      console.log(`Role already exists: ${roleArn}`);
+    } else {
+      throw e;
     }
-    throw e;
+  }
+
+  return roleArn;
+}
+
+// Attaches the ApiGatewayInvokePolicy (inline) and creates+attaches the
+// AmazonBedrockAgentCoreGatewayBasePolicyProd managed policy.
+// Called AFTER gateway creation so we have the exact gateway ID for scoping.
+async function attachGatewayBasePolicy(roleName, gatewayId, region, accountId) {
+  const apiGatewayArn = `arn:aws:execute-api:${region}:${accountId}:*/*/*`;
+  const gatewayArn = `arn:aws:bedrock-agentcore:${region}:${accountId}:gateway/${gatewayId}`;
+
+  // Inline: execute-api:Invoke — scoped to this account's APIs
+  await iamClient.send(new PutRolePolicyCommand({
+    RoleName: roleName,
+    PolicyName: 'ApiGatewayInvokePolicy',
+    PolicyDocument: JSON.stringify({
+      Version: '2012-10-17',
+      Statement: [{
+        Effect: 'Allow',
+        Action: 'execute-api:Invoke',
+        Resource: apiGatewayArn,
+      }],
+    }),
+  }));
+
+  // Managed: GetGateway + GetConfigurationBundleVersion
+  // Create as a managed policy under /service-role/ path, then attach
+  const basePolicyName = `AmazonBedrockAgentCoreGatewayBasePolicyProd-${gatewayId}`;
+  const basePolicyArn = `arn:aws:iam::${accountId}:policy/service-role/${basePolicyName}`;
+
+  const basePolicyDocument = JSON.stringify({
+    Version: '2012-10-17',
+    Statement: [
+      {
+        Sid: 'GetGateway',
+        Effect: 'Allow',
+        Action: ['bedrock-agentcore:GetGateway'],
+        Resource: [gatewayArn],
+      },
+      {
+        Sid: 'GetConfigurationBundleVersion',
+        Effect: 'Allow',
+        Action: ['bedrock-agentcore:GetConfigurationBundleVersion'],
+        Resource: [`arn:aws:bedrock-agentcore:${region}:${accountId}:configuration-bundle/*`],
+        Condition: {
+          StringEquals: {
+            'aws:ResourceAccount': '${aws:PrincipalAccount}',
+            'aws:RequestedRegion': region,
+          },
+        },
+      },
+    ],
+  });
+
+  try {
+    await iamClient.send(new CreatePolicyCommand({
+      PolicyName: basePolicyName,
+      Path: '/service-role/',
+      PolicyDocument: basePolicyDocument,
+      Description: 'Base policy for AgentCore Gateway service role',
+    }));
+    console.log(`Created managed policy: ${basePolicyArn}`);
+  } catch (e) {
+    if (e.name !== 'EntityAlreadyExistsException') throw e;
+    console.log(`Managed policy already exists: ${basePolicyArn}`);
+  }
+
+  await iamClient.send(new AttachRolePolicyCommand({
+    RoleName: roleName,
+    PolicyArn: basePolicyArn,
+  }));
+  console.log(`Attached ${basePolicyName} to ${roleName}`);
+}
+
+async function deleteGatewayRole(roleName, accountId) {
+  try {
+    // Detach managed policies
+    try {
+      const resp = await iamClient.send(new ListAttachedRolePoliciesCommand({ RoleName: roleName }));
+      for (const policy of resp.AttachedPolicies || []) {
+        await iamClient.send(new DetachRolePolicyCommand({ RoleName: roleName, PolicyArn: policy.PolicyArn }));
+        // Delete the managed policy we created (base policy is gateway-specific)
+        if (policy.PolicyName.startsWith('AmazonBedrockAgentCoreGatewayBasePolicyProd-')) {
+          try {
+            await iamClient.send(new DeletePolicyCommand({ PolicyArn: policy.PolicyArn }));
+            console.log(`Deleted managed policy: ${policy.PolicyArn}`);
+          } catch (e) { console.log(`Could not delete policy: ${e.message}`); }
+        }
+      }
+    } catch (e) { /* ignore */ }
+
+    // Delete inline policies
+    try {
+      const resp = await iamClient.send(new ListRolePoliciesCommand({ RoleName: roleName }));
+      for (const policyName of resp.PolicyNames || []) {
+        await iamClient.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: policyName }));
+      }
+    } catch (e) { /* ignore */ }
+
+    await iamClient.send(new DeleteRoleCommand({ RoleName: roleName }));
+    console.log(`Deleted IAM role: ${roleName}`);
+  } catch (e) {
+    if (e.name === 'NoSuchEntityException') console.log(`Role ${roleName} already deleted`);
+    else console.log(`Error deleting role: ${e.message}`);
   }
 }
 
@@ -424,6 +583,21 @@ function parseOpenApiSchema(schema) {
     return { toolFilters, toolOverrides };
   }
 
+  // Tool descriptions matching the old working account's gateway target toolOverrides.
+  // Confirmed from live API inspection of gateway-quick-start-4c5e0a-hbvuqocfka.
+  const TOOL_DESCRIPTIONS = {
+    'GetMenu': 'Get restaurant menu items',
+    'AddToCart': 'Add Item to cart',
+    'GetCart': 'Get current cart contents',
+    'UpdateCart': 'Update cart item',
+    'PlaceOrder': 'Place the order',
+    'GetNearestLocations': 'Find nearest locations',
+    'GeocodeAddress': 'Geocode an address',
+    'FindLocationAlongRoute': 'Find location along route',
+    'GetCustomerProfile': 'Get customer profile',
+    'GetPreviousOrders': 'Get previous orders',
+  };
+
   const validMethods = ['get', 'post', 'put', 'delete', 'patch'];
 
   for (const [path, pathItem] of Object.entries(schema.paths)) {
@@ -437,7 +611,8 @@ function parseOpenApiSchema(schema) {
 
         const operation = pathItem[method];
         const operationId = operation.operationId || generateOperationId(path, method);
-        const description = operation.summary || operation.description || undefined;
+        // Use rich description from map, fall back to API spec summary/description, then operationId
+        const description = TOOL_DESCRIPTIONS[operationId] || operation.summary || operation.description || undefined;
 
         const override = {
           name: operationId,
@@ -543,14 +718,13 @@ async function deleteGateway(gatewayId, props) {
       }
     }
 
-    // Step 3: Delete IAM role
-    console.log('Step 3: Deleting IAM role...');
-    const gatewayName = props?.GatewayName;
-    if (gatewayName) {
-      await deleteIamRole(`${gatewayName}-service-role`);
-    }
   } catch (e) {
     console.log(`Error in deletion: ${e.message}`);
+  }
+  // Delete the gateway service role
+  const roleName = `AmazonBedrockAgentCoreGatewayServiceRole-${props?.GatewayName}`;
+  if (props?.GatewayName) {
+    await deleteGatewayRole(roleName, props?.AccountId);
   }
 }
 
@@ -564,39 +738,6 @@ async function waitForTargetDeletion(gatewayId, targetId, maxAttempts = 30) {
       await sleep(2000);
     }
   }
-}
-
-async function deleteIamRole(roleName) {
-  try {
-    // Delete inline policies
-    try {
-      const resp = await iamClient.send(new ListRolePoliciesCommand({ RoleName: roleName }));
-      for (const policyName of resp.PolicyNames || []) {
-        await iamClient.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: policyName }));
-        console.log(`Deleted inline policy: ${policyName}`);
-      }
-    } catch (e) { /* ignore */ }
-
-    // Detach managed policies
-    try {
-      const resp = await iamClient.send(new ListAttachedRolePoliciesCommand({ RoleName: roleName }));
-      for (const policy of resp.AttachedPolicies || []) {
-        await iamClient.send(new DetachRolePolicyCommand({ RoleName: roleName, PolicyArn: policy.PolicyArn }));
-        console.log(`Detached policy: ${policy.PolicyName}`);
-      }
-    } catch (e) { /* ignore */ }
-
-    await iamClient.send(new DeleteRoleCommand({ RoleName: roleName }));
-    console.log(`IAM role deleted: ${roleName}`);
-  } catch (e) {
-    if (e.name === 'NoSuchEntityException') console.log(`IAM role ${roleName} already deleted`);
-    else console.log(`Error deleting IAM role: ${e.message}`);
-  }
-}
-
-async function getGatewayUrl(gatewayId) {
-  const resp = await agentcoreClient.send(new GetGatewayCommand({ gatewayIdentifier: gatewayId }));
-  return resp.gatewayUrl || '';
 }
 
 // ─── Utilities ───────────────────────────────────────────────────────────────

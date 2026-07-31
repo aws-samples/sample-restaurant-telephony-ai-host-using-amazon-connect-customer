@@ -1,413 +1,400 @@
-# Guidance for Telephony Voice Ordering on AWS
+# Guidance for Telephony Voice Ordering on AWS with Amazon Connect Customer
 
 ## Table of Contents
 
 1. [Overview](#overview)
-    - [User request flow](#user-request-flow)
-    - [Cost](#cost)
-    - [Sample Cost Table](#sample-cost-table)
-2. [Prerequisites](#prerequisites)
-    - [Operating System](#operating-system)
-    - [Third-party tools](#third-party-tools)
-    - [AWS account requirements](#aws-account-requirements)
-    - [AWS CDK bootstrap](#aws-cdk-bootstrap)
-    - [Supported Regions](#supported-regions)
-3. [Automated Deployment](#automated-deployment)
-4. [Manual Deployment](#manual-deployment)
-5. [Deployment Validation](#deployment-validation)
-6. [Running the Guidance](#running-the-guidance)
-7. [Next Steps](#next-steps)
-8. [Cleanup](#cleanup)
-9. [Notices](#notices)
-10. [FAQ, Known Issues, Additional Considerations, and Limitations](#faq-known-issues-additional-considerations-and-limitations)
-11. [Revisions](#revisions)
-12. [Authors](#authors)
+2. [Architecture](#architecture)
+3. [How It Works](#how-it-works)
+    - [Contact Flow](#contact-flow)
+    - [AI Agent Conversation](#ai-agent-conversation)
+    - [Tool Execution](#tool-execution)
+4. [Cost](#cost)
+5. [Prerequisites](#prerequisites)
+6. [Automated Deployment](#automated-deployment)
+7. [Manual Deployment](#manual-deployment)
+8. [Deployment Validation](#deployment-validation)
+9. [Running the Guidance](#running-the-guidance)
+10. [Cleanup](#cleanup)
+11. [Notices](#notices)
+12. [FAQ and Known Issues](#faq-and-known-issues)
+13. [Authors](#authors)
+
+---
 
 ## Overview
 
-This Guidance demonstrates how to build a voice-driven telephony ordering system for quick-service restaurants (QSR). Customers dial a single United States E.164 phone number on any standard carrier and converse with an AI agent that takes the order end-to-end without screens, apps, or sign-in. The Guidance addresses the PSTN ordering channel by combining a Session Initiation Protocol (SIP) gateway, real-time speech-to-speech AI, and a decoupled scalable backend.
+This guidance demonstrates how to build a fully voice-driven ordering system for quick-service restaurants (QSR) using **Amazon Connect** as the telephony layer and **Amazon Q in Connect** as the AI orchestration layer. A caller dials a standard phone number, speaks naturally, and the AI agent takes the order end-to-end - no apps, no screens, no sign-in required.
 
-The Guidance uses **Amazon Chime SDK Voice Connector** for SIP trunking and Public Switched Telephone Network (PSTN) inbound, **Amazon Bedrock AgentCore Runtime** for agent hosting with microVM session isolation, **Amazon Nova 2 Sonic** for bidirectional speech-to-speech processing, the **Strands Agents** framework for conversational agent logic, **Amazon Location Service** for geocoding and route calculation, and **Model Context Protocol (MCP)** for standardized tool interactions between the agent and backend services. The SIP signaling and Real-time Transport Protocol (RTP) media plane runs on **Amazon Elastic Container Service (Amazon ECS) on AWS Fargate** behind an internet-facing **Network Load Balancer**. All infrastructure is deployed using **AWS Cloud Development Kit (AWS CDK)**.
+**Key services used:**
 
-The architecture implements a four-section decoupled pattern:
+| Service | Role |
+|---|---|
+| **Amazon Connect** | Inbound telephony, contact flow, phone number |
+| **Amazon Lex V2** | Speech-to-speech interface using the Nova Sonic generative engine |
+| **Amazon Q in Connect** | ORCHESTRATION AI Agent (Claude Haiku 4.5) - reasoning, tool calls, conversation |
+| **Amazon Bedrock AgentCore Gateway** | MCP server exposing backend REST APIs as discoverable tools |
+| **Amazon AppIntegrations** | Registers the AgentCore Gateway as an MCP application |
+| **Amazon API Gateway** | REST API (`prod` stage, AWS_IAM authorization) |
+| **AWS Lambda** | Ten Node.js 24.x ordering functions |
+| **Amazon DynamoDB** | Five tables: Customers, Orders, Menu, Carts, Locations |
+| **Amazon Location Service** | Geocoding (place index) and route calculation |
+| **AWS CDK** | All infrastructure as code, eight CloudFormation stacks |
 
-![Telephony Voice Ordering on AWS — architecture diagram](assets/architecture.png)
+The entire solution deploys in one command and tears down completely in one command.
 
-**Section A — Backend Infrastructure.** Four AWS CDK stacks deploy the restaurant backend: **Amazon DynamoDB** tables for customer profiles, orders, menu items, carts, and locations; **Amazon Location Service** for geocoding and route calculation; **AWS Lambda** functions for business logic; and **Amazon API Gateway** REST endpoints with **AWS Identity and Access Management (IAM)** authorization.
+---
 
-**Section B — AgentCore Gateway.** One AWS CDK stack creates the **Amazon Bedrock AgentCore Gateway** with MCP protocol, exposing eight backend API endpoints as discoverable MCP tools that the agent invokes by name.
+## Architecture
 
-**Section C — AgentCore Runtime.** Three AWS CDK stacks provision the agent. `AgentEcrStack` creates the **Amazon Elastic Container Registry (Amazon ECR)** repository for the agent container. `AgentBuildStack` assembles and pushes the ARM64 container image through **AWS CodeBuild**, with **Amazon Simple Storage Service (Amazon S3)** as the source upload bucket. `AgentRuntimeStack` then deploys the **Amazon Bedrock AgentCore Runtime** itself, plus the supporting infrastructure that lets the agent personalize each call: a Node.js prompt-renderer **AWS Lambda** function that resolves the per-call system prompt at call time, three **AWS Systems Manager Parameter Store** entries that hold the loyalty prompt template (Advanced tier), the anonymous prompt template (Advanced tier), and the customer-id pepper SecureString, and the AWS Identity and Access Management role the agent microVM assumes to call **Amazon Bedrock**, **Amazon Bedrock AgentCore Gateway**, the prompt-renderer Lambda, and AWS Systems Manager. The agent runs the Strands Agents framework with Amazon Nova 2 Sonic for bidirectional voice streaming over a SigV4-signed WebSocket.
+![Architecture Diagram](assets/architecture.png)
 
-**Section D — Telephony Ingress.** Four AWS CDK stacks provision the SIP and media path: **Amazon Chime SDK Voice Connector** with a toll-free Direct Inward Dialing (DID) number, an **AWS Lambda** SIP Media Application (SMA) event handler, a shared Amazon Virtual Private Cloud (Amazon VPC), and the SIP gateway itself: an internet-facing Network Load Balancer plus a two-task Amazon ECS on AWS Fargate service running drachtio-server and a Node.js Real-time Transport Protocol bridge. SIP signaling rides Transmission Control Protocol (TCP) port 5060 through the load balancer; media (RTP/UDP 16000–16048) flows direct from Amazon Chime SDK Voice Connector to each task's auto-assigned public Internet Protocol (IP) address, with the task security group locked to the published Amazon Chime SDK Voice Connector source CIDRs.
+The solution is organized into four sections:
 
-### User request flow
+**Section A - Backend Infrastructure**
+Four stacks deploy the ordering backend: DynamoDB tables, Location Service resources, Lambda functions, and an API Gateway REST API with AWS_IAM authorization.
 
-1. The caller dials the United States E.164 toll-free phone number provisioned by **Amazon Chime SDK Voice Connector**. The carrier delivers the call to the Amazon Chime SDK Voice Connector edge.
-2. The Voice Connector triggers the **AWS Lambda** SIP Media Application handler with `NEW_INBOUND_CALL`. The handler derives a deterministic session identifier from the caller's phone number hashed with a server-side pepper from **AWS Systems Manager Parameter Store**, then issues a SigV4-signed `POST /invocations` warmup request to **Amazon Bedrock AgentCore Runtime** carrying that session identifier as the `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header. AgentCore Runtime allocates a microVM, binds the session identifier to it, and routes the warmup request to the agent container, which runs the expensive per-call setup (system prompt resolution via the prompt-renderer Lambda, Amazon Nova 2 Sonic stream open, Model Context Protocol tool discovery, agent priming) inside the warmup window and stashes the result in a microVM-local cache keyed by the session identifier. The handler returns a `CallAndBridge` action pointing back at the Voice Connector with the session identifier propagated as a custom Session Initiation Protocol (SIP) header `X-Session-Id`.
-3. The Voice Connector originates a SIP INVITE over Transmission Control Protocol port 5060 to the **Network Load Balancer** Domain Name System (DNS) name. The load balancer forwards the connection to one of the **Amazon ECS on AWS Fargate** tasks running drachtio-server. The bridged INVITE carries the `X-Session-Id` header forward unchanged.
-4. The Fargate task answers with `200 OK`. The Session Description Protocol (SDP) `c=` line carries the task's own auto-assigned public IP address, so Real-time Transport Protocol media flows direct from Amazon Chime SDK Voice Connector to the task on User Datagram Protocol (UDP) ports 16000-16048 — the load balancer is not in the media path.
-5. The task's Node.js bridge reads the `X-Session-Id` SIP header and opens a SigV4-signed WebSocket to **Amazon Bedrock AgentCore Runtime** pinned to the same session identifier. AgentCore Runtime routes the WebSocket to the warmed microVM (microVM stickiness), and the agent container attaches to the pre-built call context in milliseconds via the warm-cache lookup. Inbound caller audio (G.711 mu-law at 8 kHz) is decoded and resampled to 16 kHz Linear Pulse Code Modulation (PCM) and forwarded over the WebSocket; agent audio is paced back to the caller in 20-millisecond Real-time Transport Protocol frames.
-6. The runtime drives the **Amazon Nova 2 Sonic** bidirectional session that was opened during warmup. The Strands Agents framework drives turn-taking, transcription, and tool use; a 20-second silence-frame keepalive on the agent side prevents the model's 55-second server-side idle timeout during long backend tool calls.
-7. When the agent invokes a tool (`GetMenu`, `AddToCart`, `PlaceOrder`, `GetPreviousOrders`, and others), **Amazon Bedrock AgentCore Gateway** forwards the call as a REST request to **Amazon API Gateway**, which routes to **AWS Lambda** business handlers that read or write **Amazon DynamoDB** and call **Amazon Location Service** for geocoding. `GetPreviousOrders` enriches each order row with the location's address fields by issuing a `BatchGetCommand` against the Locations table so the agent can refer to a caller's previous pickup location by street name rather than an internal identifier.
-8. When the call ends, the Fargate bridge issues a SigV4-signed `StopRuntimeSession` to AgentCore Runtime so the per-session microVM slot is released against the account-level Active session workloads quota.
-9. **AWS CDK** deploys the entire solution with one shell script that uploads source to **Amazon S3**, triggers **AWS CodeBuild** to build the ARM64 container image stored in **Amazon ECR**, and provisions the eleven CloudFormation stacks in dependency order.
-10. **Amazon CloudWatch** ingests structured logs and custom metrics from every component (`ActiveCalls` per Fargate task, per-call duration, error counters). All data at rest is encrypted using **AWS Key Management Service (AWS KMS)**.
+**Section B - AgentCore Gateway**
+One stack provisions an Amazon Bedrock AgentCore Gateway with CUSTOM_JWT authorization. The gateway reads the OpenAPI schema from the REST API at deploy time, registers each endpoint as a named MCP tool, and validates inbound JWTs against the Connect instance's JWKS discovery endpoint.
 
-### Cost
+**Section C - Connect Instance and AI Agent**
+Two stacks create the Amazon Connect instance (with Contact Lens and bot management enabled), the Amazon Q in Connect assistant, and the ORCHESTRATION AI Agent. The agent stack registers the AgentCore Gateway as an MCP server in Amazon AppIntegrations, creates an Amazon Lex V2 bot with the Nova Sonic generative engine, defines the ORCHESTRATION AI Agent with the Claude Haiku 4.5 system prompt, publishes the agent version, and associates a security profile that grants the agent access to all ten MCP tools.
 
-You are responsible for the cost of the AWS services used while running this Guidance. As of May 2026, the cost for running this Guidance with the default settings in the US East (N. Virginia) Region is approximately **$237 per month** for processing 1,000 voice orders averaging 5 minutes each, with two always-on Amazon ECS on AWS Fargate tasks providing high availability across two Availability Zones.
+**Section D - Connect Telephony**
+One stack creates the contact flow and claims the phone number. The contact flow is the entry point for every inbound call - it enables logging, captures the caller's phone number (ANI) as a contact attribute, opens a Q in Connect session tied to the assistant, stores the session ARN, plays the greeting to the caller, and hands the call to the Amazon Lex V2 bot. When the AI agent finishes and fires `Complete` or `Escalate`, the Lex bot returns control to the contact flow which reads the result from the Lex session attributes and disconnects the call. The phone number is claimed and associated to the contact flow as part of the same stack deployment.
 
-Create a [Budget](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html) through [AWS Cost Explorer](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/) to manage costs. Prices are subject to change. For full details, refer to the pricing page for each AWS service used in this Guidance.
+---
 
-### Sample Cost Table
+## How It Works
 
-The following table provides a sample cost breakdown for deploying this Guidance with the default parameters in the US East (N. Virginia) Region for one month. Estimates assume 1,000 calls per month at 5 minutes each and two always-on Amazon ECS on AWS Fargate tasks (one per Availability Zone), and do not account for AWS Free Tier benefits.
+### Contact Flow
+
+When a call arrives, the contact flow executes six blocks in sequence:
+
+1. **UpdateFlowLoggingBehavior** - enables Contact Lens flow logging to CloudWatch.
+2. **UpdateContactAttributes** - copies `$.CustomerEndpoint.Address` (the caller's ANI) into the contact attribute `callerPhoneNumber`.
+3. **CreateWisdomSession** - opens a Q in Connect session tied to the assistant ARN. This step is mandatory - without it, Amazon Lex V2 returns "Lex needs active session for Q In Connect".
+4. **UpdateContactData** - stores the Q in Connect session ARN in the contact for downstream use.
+5. **ConnectParticipantWithLexBot** - plays the greeting *"Thank you for calling, give me a moment to connect."* and hands the call to the Amazon Lex V2 bot alias.
+6. **Compare (CheckTool)** - reads `$.Lex.SessionAttributes.Tool` after the bot returns. Routes to `DisconnectParticipant` on `Complete` or `Escalate`.
+
+### AI Agent Conversation
+
+The Amazon Q in Connect ORCHESTRATION AI Agent (Claude Haiku 4.5 - model ID `us.anthropic.claude-haiku-4-5-20251001-v1:0`) drives all conversation turns. The system prompt is configured for voice - responses are kept concise, prices are spoken naturally ("five ninety-nine"), and internal system identifiers are never exposed to the caller. The prompt instructs it to:
+
+**Ordering workflow:**
+1. Greet the caller: *"Hello, welcome to {CompanyName}! What can I get started for you today?"*
+2. If the caller asks about items or prices and no `locationId` is known: ask for their city or zip code, call `GeocodeAddress`, then `GetNearestLocations` to resolve a `locationId`. Never call `GetMenu` without a `locationId`.
+3. Call `GetMenu` with the `locationId`.
+4. Call `AddToCart` for each requested item.
+5. Call `GetCart`, read back all items and the total, and ask for confirmation.
+6. On confirmation, call `PlaceOrder` to place the order.
+7. Fire the `Complete` RETURN_TO_CONTROL tool when finished, or `Escalate` if the caller requests a human. For this demo, both paths disconnect the call. In production, wire the `Escalate` path in the contact flow to a Connect queue to transfer the caller to a live agent along with the full conversation context.
+
+### Tool Execution
+
+When the agent calls a tool, the request flows:
+
+**Amazon Q in Connect** → **Amazon Bedrock AgentCore Gateway** (MCP, CUSTOM_JWT auth) → **Amazon API Gateway** (REST, AWS_IAM, `prod` stage) → **AWS Lambda** → **Amazon DynamoDB / Amazon Location Service**
+
+The ten available MCP tools (all `MODEL_CONTEXT_PROTOCOL` type):
+
+| Tool | HTTP method + path | Lambda |
+|---|---|---|
+| `GetMenu` | `GET /menu?locationId=` | `{prefix}-GetMenu` |
+| `AddToCart` | `POST /cart` | `{prefix}-AddToCart` |
+| `GetCart` | `GET /cart?customerId=` | `{prefix}-GetCart` |
+| `UpdateCart` | `PUT /cart` | `{prefix}-UpdateCart` |
+| `PlaceOrder` | `POST /order` | `{prefix}-PlaceOrder` |
+| `GetNearestLocations` | `GET /locations/nearest?latitude=&longitude=` | `{prefix}-GetNearestLocations` |
+| `GeocodeAddress` | `GET /locations/geocode?address=` | `{prefix}-GeocodeAddress` |
+| `FindLocationAlongRoute` | `GET /locations/route?startLatitude=&startLongitude=&endLatitude=&endLongitude=` | `{prefix}-FindLocationAlongRoute` |
+| `GetCustomerProfile` | `GET /customers/profile?customerId=` | `{prefix}-GetCustomerProfile` |
+| `GetPreviousOrders` | `GET /customers/orders?customerId=` | `{prefix}-GetPreviousOrders` |
+
+Plus two `RETURN_TO_CONTROL` tools: `Complete` and `Escalate`.
+
+**Cart and order isolation:** Each caller has their own isolated cart. Concurrent calls cannot interfere with each other. The cart is automatically cleared after a successful order is placed.
+
+---
+
+## Cost
+
+You are responsible for the cost of the AWS services used while running this guidance. As of July 2026, the estimated cost for processing 1,000 voice orders averaging 5 minutes each in the US East (N. Virginia) Region is approximately **$35 per month**.
+
+Create a [Budget](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html) through [AWS Cost Explorer](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/) to help manage costs. Prices are subject to change.
 
 | AWS service | Dimensions | Cost [USD] |
-| ----------- | ---------- | ---------- |
-| [Amazon Chime SDK PSTN Audio (toll-free inbound)](https://aws.amazon.com/chime/chime-sdk/pricing/) | 5,000 inbound minutes at $0.012 per minute | $60.00 |
-| [Amazon ECS on AWS Fargate (ARM64)](https://aws.amazon.com/fargate/pricing/) | 2 tasks, 1 vCPU + 2 GB memory each, 730 hours per month | $72.08 |
-| [Amazon Bedrock (Nova 2 Sonic)](https://aws.amazon.com/bedrock/pricing/) | ~680 input + ~5,083 output speech tokens per session, ~7,438 input + ~1,260 output text tokens per session, 1,000 sessions | $68.96 |
-| [Amazon Network Load Balancer](https://aws.amazon.com/elasticloadbalancing/pricing/) | 1 internet-facing load balancer, 730 hours, modest LCU usage | $21.43 |
-| [Amazon Bedrock AgentCore Runtime](https://aws.amazon.com/bedrock/agentcore/pricing/) | 1,000 sessions, ~5 minutes each, ~30% active CPU, 1 vCPU, 2 GB memory | $5.20 |
-| [Amazon Chime SDK Voice Connector](https://aws.amazon.com/chime/chime-sdk/pricing/) | 5,000 minutes at $0.00071 per minute, 1 toll-free phone number at $2.00 per month | $5.55 |
-| [Amazon CloudWatch](https://aws.amazon.com/cloudwatch/pricing/) | ~5 GB log ingestion, 10 custom metrics, 5 alarms | $4.50 |
-| [AWS Lambda](https://aws.amazon.com/lambda/pricing/) | ~30,000 invocations, 512 MB, ~1 second average duration | $0.30 |
-| [Amazon API Gateway](https://aws.amazon.com/api-gateway/pricing/) | ~29,000 REST API calls | $0.10 |
-| [Amazon Bedrock AgentCore Gateway](https://aws.amazon.com/bedrock/agentcore/pricing/) | 1,000 search calls plus 29,000 tool invocations, 8 tools indexed | $0.17 |
-| [Amazon DynamoDB](https://aws.amazon.com/dynamodb/pricing/) | 5 tables, on-demand, ~30,000 reads plus ~5,000 writes | $0.05 |
-| [Amazon Location Service](https://aws.amazon.com/location/pricing/) | ~1,000 geocoding calls plus ~500 route calculations | $0.50 |
-| [Amazon ECR](https://aws.amazon.com/ecr/pricing/) | ~1 GB image storage above the free tier | $0.10 |
-| [Amazon S3 (CodeBuild source)](https://aws.amazon.com/s3/pricing/) | <100 MB source asset storage | $0.05 |
-| [AWS Systems Manager Parameter Store (advanced)](https://aws.amazon.com/systems-manager/pricing/) | 3 advanced parameters (customer-id pepper SecureString + loyalty prompt + anonymous prompt, both over 4 KB), 730 hours | $0.15 |
-| | **Estimated Total** | **~$237** |
+|---|---|---|
+| [Amazon Connect - inbound DID minutes](https://aws.amazon.com/connect/pricing/) | 5,000 inbound minutes at $0.0018/min | $9.00 |
+| [Amazon Bedrock - Nova Sonic (via Lex)](https://aws.amazon.com/bedrock/pricing/) | ~5,763 speech tokens/session × 1,000 sessions | $12.50 |
+| [Amazon Bedrock - Claude Haiku 4.5 (orchestration)](https://aws.amazon.com/bedrock/pricing/) | ~8,698 text tokens/session × 1,000 sessions | $7.50 |
+| [Amazon Lex V2](https://aws.amazon.com/lex/pricing/) | 5,000 speech requests | $2.50 |
+| [Amazon Connect - phone number](https://aws.amazon.com/connect/pricing/) | 1 DID phone number | $1.00 |
+| [Amazon Bedrock AgentCore Gateway](https://aws.amazon.com/bedrock/agentcore/pricing/) | ~10,000 tool invocations | $0.10 |
+| [Amazon CloudWatch](https://aws.amazon.com/cloudwatch/pricing/) | ~3 GB log ingestion | $1.50 |
+| [AWS Lambda](https://aws.amazon.com/lambda/pricing/) | ~30,000 invocations, 256 MB, ~0.5 s avg | $0.20 |
+| [Amazon API Gateway](https://aws.amazon.com/api-gateway/pricing/) | ~10,000 REST API calls | $0.04 |
+| [Amazon DynamoDB](https://aws.amazon.com/dynamodb/pricing/) | 5 tables, on-demand, ~35,000 ops | $0.05 |
+| [Amazon Location Service](https://aws.amazon.com/location/pricing/) | ~1,000 geocode + ~500 place searches | $0.50 |
+| | **Estimated Total** | **~$35** |
 
-**Notes:**
+Notes:
+- Switching from DID to toll-free increases the inbound per-minute rate from $0.0018 to $0.012.
+- The Connect instance itself has no hourly charge - you pay for usage only.
+- Costs scale roughly linearly with call volume.
 
-- Toll-free per-minute charges and always-on Amazon ECS on AWS Fargate task hours are the dominant cost drivers (about 56 percent of the total).
-- Switching from a toll-free to a local Direct Inward Dialing number reduces the inbound minute charge from $0.012 per minute to about $0.0011 per minute, lowering the monthly estimate by roughly $54.
-- Right-sizing or scaling the Amazon ECS on AWS Fargate fleet to zero outside business hours is a viable cost optimization once traffic patterns are known.
-- Amazon Nova 2 Sonic output speech tokens drive Amazon Bedrock cost; observed pricing is consistent with the public quick-service-restaurant ordering reference architecture.
-- Costs scale roughly linearly with call volume above the always-on baseline.
+---
 
 ## Prerequisites
 
 ### Operating System
 
-These deployment instructions are tested on **macOS**, **Amazon Linux 2023**, and mainstream Linux distributions. Deployment on Windows is not tested; use Windows Subsystem for Linux 2 (WSL2) if needed.
+Tested on **macOS**, **Amazon Linux 2023**, and mainstream Linux distributions. Windows is not tested; use WSL2 if needed.
 
 ### Third-party tools
 
-Install the following four tools before deployment:
-
-- [Node.js](https://nodejs.org/) version 24.x or later (required for AWS CDK, the Lambda bundler, and synthetic-data scripts; Node.js 25.x is also accepted).
-- [AWS Command Line Interface (AWS CLI)](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) version 2.x configured with credentials.
+- [Node.js](https://nodejs.org/) version 18.x or later (24.x recommended). Required for AWS CDK, the `esbuild` Lambda bundler, and synthetic-data scripts.
+- [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) version 2.x, configured with credentials.
 - [git](https://git-scm.com/) for cloning the repository.
-- (Optional) [Docker](https://www.docker.com/) only if you want to run the SIP gateway container locally for debugging. **Docker is not required to deploy.**
 
-The agent container is Python 3.13, but a developer with only the four tools above can deploy the full stack. There is no need to install `python`, `pip`, `poetry`, `uv`, `pyenv`, `conda`, `portaudio`, `libsrtp`, `libopus`, `ffmpeg`, or related toolchains on your workstation. All Python package resolution and container assembly runs inside AWS CodeBuild on ARM64 at deploy time.
+No Docker, Python, or additional runtimes are required.
 
 ### AWS account requirements
 
-- AWS Identity and Access Management permissions to deploy AWS CDK stacks and AWS CloudFormation templates, and to create resources in: Amazon Chime SDK PSTN Audio, Amazon Bedrock AgentCore Runtime and Gateway, Amazon Bedrock (Nova 2 Sonic), AWS Lambda, Amazon DynamoDB, Amazon Location Service, Amazon API Gateway, Amazon ECR, AWS CodeBuild, Amazon S3, Amazon CloudWatch Logs and Metrics, AWS Systems Manager Parameter Store, Amazon ECS, AWS Fargate, Amazon VPC, and AWS Identity and Access Management.
-- Amazon Bedrock model access for **Amazon Nova 2 Sonic** (`amazon.nova-2-sonic-v1:0`). Request access through the [Amazon Bedrock console](https://console.aws.amazon.com/bedrock/) model access page.
-- Amazon Chime SDK PSTN Audio access. Phone-number ordering is governed by a separate AWS service quota; if you have never ordered an Amazon Chime SDK phone number in this account, request a quota increase through the [Amazon Chime SDK console](https://console.aws.amazon.com/chime-sdk/) before deployment.
+- IAM permissions to create resources in: Amazon Connect, Amazon Lex V2, Amazon Q in Connect, Amazon Bedrock AgentCore Gateway, AWS Lambda, Amazon DynamoDB, Amazon Location Service, Amazon API Gateway, Amazon CloudWatch Logs, Amazon AppIntegrations, and AWS IAM.
+
+- **Amazon Bedrock model access - Amazon Nova Sonic** (`amazon.nova-2-sonic-v1:0`). Required for the Amazon Lex V2 generative (speech-to-speech) engine. Request access through the [Amazon Bedrock console](https://console.aws.amazon.com/bedrock/) model access page.
+
+- **Amazon Bedrock model access - Anthropic Claude Haiku 4.5** (`us.anthropic.claude-haiku-4-5-20251001-v1:0`). Required for the Q in Connect ORCHESTRATION AI Agent. Request access through the [Amazon Bedrock console](https://console.aws.amazon.com/bedrock/) model access page.
+
+- **Amazon Connect phone number quota ≥ 1**. If you have never claimed an Amazon Connect phone number in this account and Region, request a quota increase through the [Service Quotas console](https://console.aws.amazon.com/servicequotas/) before deployment.
+
+- **`BOT_MANAGEMENT` instance attribute** - enabled automatically by the `ConnectInstanceStack` custom resource Lambda. Without it, the Amazon Lex V2 Nova Sonic generative engine returns an error.
+
+- **`CONTACT_LENS` instance attribute** - enabled by the `ConnectInstanceStack` CDK definition (`contactLens: true`). Required for Amazon Q in Connect AI Agent voice interactions.
 
 ### AWS CDK bootstrap
 
-If you are using AWS CDK for the first time in this account or Region, bootstrap the environment:
+If you have not previously deployed an AWS CDK app in this account and Region:
 
 ```bash
 npx cdk bootstrap aws://<ACCOUNT_ID>/<REGION>
 ```
 
-Replace `<ACCOUNT_ID>` with your AWS account ID and `<REGION>` with your target Region (for example, `us-east-1`).
-
 ### Supported Regions
 
-Deploy in a Region where all three of the following are available:
+`us-east-1` (US East, N. Virginia) is the recommended and tested Region. Several stack resources are configured for `us-east-1`. Before deploying to another Region, verify that all of the following are available there:
 
-- Amazon Bedrock model access for Amazon Nova 2 Sonic (`amazon.nova-2-sonic-v1:0`).
-- Amazon Chime SDK PSTN Audio.
-- Amazon Bedrock AgentCore Runtime.
+- Amazon Bedrock - Nova Sonic (`amazon.nova-2-sonic-v1:0`)
+- Amazon Bedrock - Claude Haiku 4.5 (`us.anthropic.claude-haiku-4-5-20251001-v1:0`)
+- Amazon Connect with Q in Connect ORCHESTRATION AI Agent type
+- Amazon Bedrock AgentCore Gateway
 
-`us-east-1` (US East, N. Virginia) is the recommended starting Region. Check the [Amazon Bedrock pricing page](https://aws.amazon.com/bedrock/pricing/) for current Region availability.
-
-Amazon Bedrock AgentCore Runtime supports a subset of Availability Zones per Region. In `us-east-1` as of May 2026, the supported Availability Zone IDs are `use1-az1`, `use1-az2`, and `use1-az4`. The Availability Zone ID to letter mapping is randomized per account, so the deploy script `scripts/deploy-all.sh` resolves the supported letters at deploy time and passes them to the network stack as AWS CDK context — no manual Availability Zone selection is required.
+---
 
 ## Automated Deployment
 
-For automated deployment, the script `scripts/deploy-all.sh` provisions every AWS CDK stack in dependency order, threads cross-stack identifiers via `cdk-outputs/*.json` files and `--parameters Stack:Key=Value` flags, and waits for AWS CodeBuild to finish building the agent container image.
-
-**Usage:**
+The script `scripts/deploy-all.sh` deploys all eight stacks in dependency order and seeds synthetic data into DynamoDB.
 
 ```bash
-git clone https://github.com/aws-samples/sample-restaurant-telephony-ai-host-using-amazon-bedrock-agentcore-nova-sonic.git
-cd sample-restaurant-telephony-ai-host-using-amazon-bedrock-agentcore-nova-sonic
+git clone https://github.com/aws-samples/sample-restaurant-amazon-connect-telephony-ai-host-using-amazon-bedrock-agentcore.git
+cd sample-restaurant-amazon-connect-telephony-ai-host-using-amazon-bedrock-agentcore
 
-# 1. Preflight — verifies Node.js, npm, AWS CLI, git, AWS CDK bootstrap, and Amazon Bedrock model access.
-./scripts/preflight-check.sh
-
-# 2. Deploy with the default deployment prefix.
-./scripts/deploy-all.sh --deploymentPrefix qsr-tel
+./scripts/deploy-all.sh --deploymentPrefix qsr-cn
 ```
 
-**Optional parameters:**
-
-- `--deploymentPrefix <name>` — Prefix applied to every physical resource name. Must match `^[a-z][a-z0-9-]{1,19}$` (1-20 lowercase characters, starting with a letter). Default: `qsr-tel`.
-- `--mode update|fresh` — `update` (default) is an idempotent redeploy; `fresh` runs `cleanup-all.sh --force` before deploying.
-- `--force-deploy` — Redeploy every layer even if `.deployment-state.json` marks it as already done.
-- `--skip-preflight` — Skip the Node.js, npm, AWS CLI, and git preflight check.
-- `--company-name "<brand>"` — Brand identity for the deployment. (1) Rebrands every synthetic-data location's display name to this value, and (2) substitutes `{BUSINESS_NAME}` in the Telephony agent's system prompt at AWS CDK synth time so the agent greets callers as this brand. Defaults to `Amazing Burgers` when omitted.
-- `--synth-business-name "<query>"` — Business search term passed verbatim to Amazon Location Service Geo Places (for example, `burgers`, `pizza`, `tacos`, or `Burger Restaurants`). Determines what real-world locations get pulled into the synthetic Locations table. Does not affect the agent's system prompt.
-- `--synth-location "<where>"` — City, ZIP code, address, or `"lat,lon"` pair used as the search anchor for Amazon Location Service Geo Places.
-- `--with-synthetic-data --user-name "Jane Doe" --user-phone "+12125550100" --synth-location "Dallas, Texas" --synth-business-name "Burger Restaurants" --company-name "My Awesome Restaurant"` — Synthetic data is seeded **by default**; this flag is an explicit opt-in kept for backward compatibility. The example shows every synthetic-data flag together.
-- `--skip-synthetic-data` — Opt out of seeding entirely for an infrastructure-only deploy.
-
-**Synthetic data is seeded by default.** A bare `./scripts/deploy-all.sh --deploymentPrefix qsr-tel` populates Amazon DynamoDB with real-world locations, a generated menu, and (when `--user-phone` is supplied) a loyalty customer with order history — because the demo is hollow without it. When a flag is omitted, these defaults apply: `--user-name "Jane Doe"`, `--synth-location "Dallas, Texas"`, `--synth-business-name "Burger Restaurants"`, `--company-name "Amazing Burgers"`.
-
-`--user-phone` has no default — it is the real number you dial from to test the loyalty greeting. If you omit it, the deploy seeds locations and menu only (anonymous callers can still order end-to-end) and skips the loyalty customer; an interactive run asks you to confirm this anonymous-only path. Add the loyalty caller later without redeploying the infrastructure:
-
-```bash
-./scripts/deploy-all.sh --only tel-synthetic-data \
-  --user-name "Jane Doe" --user-phone "+12125550100"
-```
-
-**Demo rebrand pattern:** The brand you are demoing for may not have enough real locations near your test region for Amazon Location Service Geo Places to return useful results. To work around this, broaden `--synth-business-name` to a search term that returns plenty of locations, then set `--company-name` to the brand you want the agent to present. Every seeded location is rebranded to `--company-name`, and the agent greets callers as that brand. For example, `--synth-business-name "Burger Restaurants" --company-name "My Awesome Restaurant"` populates the Locations table from a wide burger search around `--synth-location` while keeping the agent on-brand for the demo.
-
-**What the script does:**
-
-- Verifies all prerequisites (Node.js, npm, AWS CLI, git, AWS CDK bootstrap, Amazon Bedrock model access).
-- Deploys the backend infrastructure (Amazon DynamoDB tables, Amazon Location Service resources, AWS Lambda functions, Amazon API Gateway).
-- Deploys Amazon Bedrock AgentCore Gateway (MCP server exposing backend APIs as discoverable tools).
-- Builds the ARM64 container image in AWS CodeBuild and pushes it to Amazon ECR.
-- Deploys Amazon Bedrock AgentCore Runtime with the built image.
-- Deploys the SIP gateway (Amazon ECS on AWS Fargate behind a Network Load Balancer).
-- Provisions the Amazon Chime SDK Voice Connector, toll-free phone number, SIP rule, and SIP Media Application Lambda.
-- Optionally seeds synthetic data into Amazon DynamoDB for an end-to-end test.
-
-On success, the final line of standard output is the single externally visible artifact:
+On success, the script prints:
 
 ```
-Your telephony agent is live at +1XXXXXXXXXX — dial to test.
+Your restaurant AI host is live at +1XXXXXXXXXX - dial to test.
 ```
 
-A second deployment into the same AWS account requires cloning the repository into a fresh folder and passing a different `--deploymentPrefix`. The deployment-state file enforces a first-prefix-wins lock per working copy.
+### Deploy options
 
-**Note:** For a detailed understanding of each deployment step, see the [Manual Deployment](#manual-deployment) section.
+| Flag | Default | Description |
+|---|---|---|
+| `--deploymentPrefix <name>` | `qsr-cn` | Prefix applied to all resource names. Must match `^[a-z][a-z0-9-]{1,19}$`. |
+| `--mode update\|fresh` | `update` | `update` = idempotent redeploy. `fresh` = cleanup then deploy. |
+| `--force-deploy` | - | Redeploy every stack even if already marked done. |
+| `--skip-preflight` | - | Skip Node.js / AWS CLI checks. |
+| `--only <component>` | - | Deploy one component. Valid: `cn-ddb`, `cn-location`, `cn-lambdas`, `cn-apigw`, `cn-instance`, `cn-gateway`, `cn-ai-agent`, `cn-telephony`, `cn-synthetic-data`. |
+| `--company-name "<brand>"` | `Amazing Burgers` | Brand name used in the AI agent system prompt greeting and in seeded location data. |
+| `--user-name "<name>"` | `Jane Doe` | Display name for the synthetic loyalty customer. |
+| `--user-phone <E.164>` | (none) | Phone number for the loyalty customer - the number you dial from. If omitted, only menu and location data is seeded. |
+| `--synth-location "<where>"` | `Dallas, Texas` | Search anchor for Amazon Location Service geo-place queries when seeding locations. |
+| `--synth-business-name "<query>"` | `Burger Restaurants` | Search term for Amazon Location Service geo-places. Determines what real-world locations populate the Locations table. |
+| `--skip-synthetic-data` | - | Skip DynamoDB seeding entirely. |
+| `--phone-country-code <cc>` | `US` | ISO country code for the claimed phone number. |
+| `--phone-type DID\|TOLL_FREE` | `DID` | Phone number type. |
+| `--yes` | - | Non-interactive mode. |
+
+**Demo rebrand tip:** Use `--company-name` to control what brand the agent announces and `--synth-business-name` to control what real-world locations are pulled into the Locations table. For example, `--synth-business-name "Burger Restaurants" --company-name "My Restaurant"` searches for burger restaurants near `--synth-location` and brands them as "My Restaurant".
+
+### What the script deploys
+
+1. **DynamoDBStack** - five DynamoDB tables
+2. **LocationStack** - Amazon Location Service place index and route calculator
+3. **LambdaStack** - ten Node.js 24.x Lambda ordering functions
+4. **ApiGatewayStack** - REST API (`prod` stage, AWS_IAM)
+5. Synthetic data - menu items, restaurant locations, optional loyalty customer
+6. **ConnectInstanceStack** - Connect instance, Q in Connect assistant
+7. **AgentCoreGatewayStack** - AgentCore Gateway with MCP + CUSTOM_JWT
+8. **ConnectAIAgentStack** - Lex bot, ORCHESTRATION AI Agent, security profile
+9. **ConnectTelephonyStack** - contact flow, phone number
+
+Cross-stack identifiers are threaded via `cdk-outputs/*.json` files using `--parameters Stack:Key=Value`. There are no CloudFormation cross-stack exports.
+
+---
 
 ## Manual Deployment
 
-Each module is an independent AWS CDK app. Deploy in the eleven-step order below; later modules consume outputs from earlier ones.
+Each module is an independent AWS CDK app. Deploy in this order:
 
-| # | Module | AWS CDK directory | Stack |
+| Step | Key | CDK directory | Stack ID |
 |---|---|---|---|
-| 1 | DynamoDB tables | `backend/backend-infrastructure/` | `DynamoDBStack` |
-| 2 | Amazon Location Service | `backend/backend-infrastructure/` | `LocationStack` |
-| 3 | Ordering AWS Lambda functions | `backend/backend-infrastructure/` | `LambdaStack` |
-| 4 | Amazon API Gateway | `backend/backend-infrastructure/` | `ApiGatewayStack` |
-| 5 | Amazon Bedrock AgentCore Gateway | `backend/agentcore-gateway/cdk/` | `AgentCoreGatewayStack` |
-| 6 | Shared Amazon VPC | `backend/network/` | `NetworkStack` |
-| 7 | Agent Amazon ECR | `backend/agentcore-runtime-telephony/cdk/ecr/` | `AgentEcrStack` |
-| 8 | Agent AWS CodeBuild | `backend/agentcore-runtime-telephony/cdk/build/` | `AgentBuildStack` |
-| 9 | Amazon Bedrock AgentCore Runtime | `backend/agentcore-runtime-telephony/cdk/runtime/` | `AgentRuntimeStack` |
-| 10 | SIP gateway (Amazon ECS on AWS Fargate + Network Load Balancer) | `telephony-interface/telephony-sip-gateway/cdk/` | `SipGatewayStack` |
-| 11 | Telephony ingress (Amazon Chime SDK Voice Connector + phone number + SMA Lambda) | `telephony-interface/telephony-ingress/cdk/` | `IngressStack` |
+| 1 | `cn-ddb` | `backend/backend-infrastructure/` | `DynamoDBStack` |
+| 2 | `cn-location` | `backend/backend-infrastructure/` | `LocationStack` |
+| 3 | `cn-lambdas` | `backend/backend-infrastructure/` | `LambdaStack` |
+| 4 | `cn-apigw` | `backend/backend-infrastructure/` | `ApiGatewayStack` |
+| 4.5 | `cn-synthetic-data` | `backend/synthetic-data/` | (Node.js script) |
+| 5 | `cn-instance` | `connect-interface/connect-instance/cdk/` | `ConnectInstanceStack` |
+| 6 | `cn-gateway` | `backend/agentcore-gateway/cdk/` | `AgentCoreGatewayStack` |
+| 7 | `cn-ai-agent` | `connect-interface/connect-ai-agent/cdk/` | `ConnectAIAgentStack` |
+| 8 | `cn-telephony` | `connect-interface/connect-telephony/cdk/` | `ConnectTelephonyStack` |
 
-Each AWS CDK invocation must thread `--parameters <StackId>:DeploymentPrefix=<prefix>` plus any upstream identifiers from `cdk-outputs/*.json`. The `json_val` helper in `scripts/deploy-all.sh` documents the exact parameter names per layer; reading the script is the most direct way to derive a manual single-layer recipe. Each module also carries its own `README.md` with the per-stack `CfnParameter` and `CfnOutput` catalog.
+Each CDK invocation requires `--parameters <StackId>:DeploymentPrefix=<prefix>` plus upstream identifiers read from `cdk-outputs/*.json`. The `deploy_stack` function in `scripts/deploy-all.sh` documents the exact parameter names per layer.
+
+---
 
 ## Deployment Validation
 
-After `scripts/deploy-all.sh` completes, verify that every CloudFormation stack is live:
+After deployment completes, verify all stacks are in `CREATE_COMPLETE` or `UPDATE_COMPLETE`:
 
 ```bash
 aws cloudformation list-stacks \
   --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
-  --query "StackSummaries[?StackName=='DynamoDBStack' \
-    || StackName=='LocationStack' \
-    || StackName=='LambdaStack' \
-    || StackName=='ApiGatewayStack' \
-    || StackName=='AgentCoreGatewayStack' \
-    || StackName=='NetworkStack' \
-    || StackName=='AgentEcrStack' \
-    || StackName=='AgentBuildStack' \
-    || StackName=='AgentRuntimeStack' \
-    || StackName=='SipGatewayStack' \
-    || StackName=='IngressStack'].StackName"
+  --region us-east-1 \
+  --query "StackSummaries[].StackName"
 ```
 
-All eleven stacks are expected. Confirm the Amazon ECS service is healthy:
+Expected stacks: `DynamoDBStack`, `LocationStack`, `LambdaStack`, `ApiGatewayStack`, `ConnectInstanceStack`, `AgentCoreGatewayStack`, `ConnectAIAgentStack`, `ConnectTelephonyStack`.
+
+Confirm the phone number:
 
 ```bash
-aws ecs describe-services --region us-east-1 \
-  --cluster <prefix>-sip-gateway \
-  --services <prefix>-sip-gateway \
-  --query 'services[0].{desired:desiredCount,running:runningCount,rolloutState:deployments[0].rolloutState}'
+cat cdk-outputs/cn-telephony.json
 ```
 
-Expected output: `desired = 2`, `running = 2`, `rolloutState = COMPLETED`.
-
-Order provenance is persisted in the `<prefix>-Orders` Amazon DynamoDB table with `channel = "telephony"`, a non-empty `fromPhoneNumber` (or `""` for anonymous callers), and an `anonymousCaller` boolean. After dialing the test number and placing a sample order, scan the table:
+After placing a test order, verify it was persisted:
 
 ```bash
-aws dynamodb scan --table-name <prefix>-Orders \
-  --filter-expression "#c = :ch" \
-  --expression-attribute-names '{"#c":"channel"}' \
-  --expression-attribute-values '{":ch":{"S":"telephony"}}' \
-  --max-items 5
+aws dynamodb scan --table-name <prefix>-Orders --region us-east-1 --max-items 5
 ```
+
+---
 
 ## Running the Guidance
 
-There is no web user interface, no test client, and no browser step. Dial the United States E.164 phone number printed at the end of `scripts/deploy-all.sh` from a standard United States telephone capable of reaching toll-free numbers. The Amazon Chime SDK Voice Connector answers, the Amazon ECS on AWS Fargate task accepts the SIP INVITE and starts a Real-time Transport Protocol media stream direct to the task, and the SigV4-signed WebSocket to Amazon Bedrock AgentCore Runtime carries audio in both directions.
-
-### Inputs
-
-- A working United States telephone capable of dialing toll-free numbers.
-- (Optional) A test caller phone number provisioned in Amazon DynamoDB through `scripts/deploy-all.sh --with-synthetic-data` so the agent recognizes a returning customer.
+Dial the phone number printed at the end of `deploy-all.sh`. No browser, app, or other step is required.
 
 ### Example conversation
 
 ```
-Caller: (dials +1XXXXXXXXXX)
+Agent:  Thank you for calling, give me a moment to connect.
+        [Q in Connect session starts - agent greets]
+        Hello, welcome to Amazing Burgers! What can I get started
+        for you today?
 
-Agent:  Hi, thanks for calling. What can I get for you today?
+Caller: I'd like to order a burger.
 
-Caller: I would like a chicken sandwich combo.
+Agent:  Sure! Which city or zip code are you ordering from?
 
-Agent:  Sure. Which ZIP code or cross-street should I use for pickup?
+Caller: 75009.
 
-Caller: 75495.
+Agent:  [Calls GeocodeAddress, GetNearestLocations, GetMenu]
+        Great - our nearest location is Amazing Burgers at 3699
+        McKinney Avenue in Dallas. We have a Classic Burger for
+        five ninety-nine and a Deluxe Burger for eight ninety-nine.
+        What would you like?
 
-Agent:  [Calling tools: GeocodeAddress, GetNearestLocations, GetMenu,
-         AddToCart, PlaceOrder]
+Caller: Classic Burger and a fountain drink.
 
-        Got it — one chicken sandwich combo for pickup at the Van
-        Alstyne location, total $7.79, ready in about 15 minutes.
-        Anything else?
+Agent:  [Calls AddToCart]
+        Got it - one Classic Burger and one Fountain Drink added.
+        Your total is seven ninety-eight. Does that sound right?
 
-Caller: No, that is it. Thank you.
+Caller: Yes.
 
-Agent:  You are welcome — order confirmed. Have a great day.
+Agent:  [Calls PlaceOrder]
+        Your order is confirmed. Thank you for calling Amazing Burgers!
+
+        [Fires Complete - contact flow disconnects]
 ```
-
-### Expected output
-
-- **Voice transcription.** The caller's speech is transcribed by Amazon Nova 2 Sonic and visible in the Amazon CloudWatch Logs stream for the runtime.
-- **Agent response.** A natural voice response with order details streams back to the caller in real time over the WebSocket and the Real-time Transport Protocol media stream.
-- **Tool invocations.** Backend tools (`GetMenu`, `AddToCart`, `GetCustomerProfile`, `GeocodeAddress`, `PlaceOrder`, and others) are called asynchronously through Amazon Bedrock AgentCore Gateway.
-- **Order confirmation.** Order ID, total, and estimated ready time are spoken back to the caller and persisted in Amazon DynamoDB.
 
 ### Debugging and logging
 
-- **SIP gateway logs.** Amazon CloudWatch Logs at `/ecs/<prefix>-sip-gateway` capture every SIP transaction (INVITE, 200 OK, ACK, BYE) and Real-time Transport Protocol bridge events from drachtio-server and the Node.js bridge.
-- **Agent logs.** Amazon CloudWatch Logs at `/aws/bedrock-agentcore/runtimes/<runtime-name>` show the Strands Agents framework events, Amazon Nova 2 Sonic turn-taking, and tool-call details.
-- **Lambda logs.** Amazon CloudWatch Logs at `/aws/lambda/<function-name>` for every ordering function and the SIP Media Application handler.
-- **Amazon API Gateway logs.** Amazon CloudWatch Logs for the REST endpoint, with full request and response visibility on each tool call.
-- **Custom metrics.** Active call counts per task and per service are published to the `<prefix>/SipGateway` Amazon CloudWatch namespace and drive autoscaling.
+| Log source | Where to look |
+|---|---|
+| Contact flow | CloudWatch Logs: `/aws/connect/<prefix>-restaurant` |
+| Q in Connect AI Agent | CloudWatch Logs: `/aws/bedrock-agentcore/runtimes/<runtime>` |
+| Lambda functions | CloudWatch Logs: `/aws/lambda/<prefix>-<function>` |
+| API Gateway access | CloudWatch Logs: `/aws/apigateway/<prefix>-api-access-logs` |
 
-## Next Steps
-
-Consider the following enhancements after deploying this Guidance:
-
-- **Verified customer identification.** Layer one-time-password verification on top of the pseudonymous phone-hash and add a `phoneNumber` Global Secondary Index on `<prefix>-Customers`.
-- **Inbound interactive voice response options** through Amazon Chime SDK `SpeakAndGetDigits`.
-- **Outbound callbacks** ("your order is ready") through `CreateSipMediaApplicationCall`.
-- **Multi-language support.** Amazon Nova 2 Sonic supports additional languages; extend the system prompt and menu data and configure voice selection per detected language.
-- **Long-term call recording.** Configure Amazon S3 lifecycle and Amazon Chime SDK Voice Connector streaming for compliance or quality-assurance retention.
-- **Call detail records.** Add an `<prefix>-CallDetailRecords` Amazon DynamoDB table and write one row per call on hangup for operational reporting.
-- **Cross-region failover.** Deploy a second Region and use Amazon Route 53 latency-based routing with health checks for geographic redundancy.
-- **End-of-call summarization.** Pipe transcripts to a customer relationship management or point-of-sale system for follow-up.
+---
 
 ## Cleanup
 
-Remove all deployed resources to stop incurring charges. The cleanup script destroys resources in reverse deployment order so that consumer stacks are removed before the producer stacks they depend on.
-
-> **Warning:** Cleanup is destructive. Order history in Amazon DynamoDB, the toll-free phone number, the customer-id pepper in AWS Systems Manager Parameter Store, and any container images in Amazon ECR are deleted along with the stacks. Back up any data you want to keep before running cleanup.
-
-### Automated cleanup
-
-Preview what will be deleted, then run the cleanup:
-
 ```bash
-# Preview deletions — no resources are removed.
-./scripts/cleanup-all.sh --dry-run
-
-# Delete every stack provisioned by deploy-all.sh.
-./scripts/cleanup-all.sh
+./scripts/cleanup-all.sh --force --deploymentPrefix qsr-cn
 ```
 
-The script destroys resources in this order:
+> **Warning:** Cleanup is irreversible. All DynamoDB order data, the claimed phone number, the Connect instance, and all associated resources are permanently deleted. Back up any data you want to keep before running cleanup.
 
-1. `IngressStack` — releases the Amazon Chime SDK toll-free phone number, deletes the SIP rule and SIP Media Application, removes the SMA Lambda.
-2. `SipGatewayStack` — drains and deletes the Amazon ECS on AWS Fargate service, deletes the Network Load Balancer, removes the Amazon ECR repository.
-3. `AgentRuntimeStack` — removes the Amazon Bedrock AgentCore Runtime and the customer-id pepper SecureString.
-4. `AgentBuildStack` — deletes the AWS CodeBuild project and source Amazon S3 bucket.
-5. `AgentEcrStack` — deletes the Amazon ECR repository for the agent container.
-6. `NetworkStack` — deletes the Amazon Virtual Private Cloud, subnets, and Network Address Translation gateways.
-7. `AgentCoreGatewayStack` — deletes the Amazon Bedrock AgentCore Gateway and the gateway service role.
-8. `ApiGatewayStack` — deletes the REST API and execution role.
-9. `LambdaStack` — deletes the ten ordering AWS Lambda functions.
-10. `LocationStack` — deletes the Amazon Location Service place-index and route-calculator.
-11. `DynamoDBStack` — deletes the five Amazon DynamoDB tables.
+The script destroys stacks in this order (reverse of deploy):
 
-### Cleanup flags
+1. `ConnectTelephonyStack` - releases the phone number, deletes the contact flow
+2. `ConnectAIAgentStack` - disassociates security profiles, deletes the AI Agent, Lex bot, system prompt, AppIntegrations application
+3. `ConnectInstanceStack` - deletes the Connect instance and Q in Connect assistant
+4. `AgentCoreGatewayStack` - deletes the AgentCore Gateway, target, and gateway IAM service role
+5. `ApiGatewayStack` - deletes the REST API
+6. `LambdaStack` - deletes the ten Lambda functions
+7. `LocationStack` - deletes the place index and route calculator
+8. `DynamoDBStack` - deletes all five DynamoDB tables
 
-| Flag | Purpose |
-|---|---|
-| `--force` | Skip confirmation prompts and pass `--force` to `cdk destroy`. |
-| `--dry-run` | Show what would be deleted without deleting anything. |
-| `--ignore-missing-resources` | Continue past stacks that have already been deleted. |
-| `--skip-<component>` | Skip an individual layer (for example, `--skip-ingress` to keep the toll-free phone number). |
+Verify in the [AWS CloudFormation console](https://console.aws.amazon.com/cloudformation/) that all eight stacks show `DELETE_COMPLETE`.
 
-### Verify cleanup
-
-Open the [AWS CloudFormation console](https://console.aws.amazon.com/cloudformation/) and confirm that all eleven stacks have been deleted. Confirm in the [Amazon Chime SDK console](https://console.aws.amazon.com/chime-sdk/) that the toll-free phone number has been released back to the pool. Confirm in the [Amazon ECR console](https://console.aws.amazon.com/ecr/) that the agent and SIP gateway repositories have been deleted.
+---
 
 ## Notices
 
 *Customers are responsible for making their own independent assessment of the information in this Guidance. This Guidance: (a) is for informational purposes only, (b) represents AWS current product offerings and practices, which are subject to change without notice, and (c) does not create any commitments or assurances from AWS and its affiliates, suppliers or licensors. AWS products or services are provided "as is" without warranties, representations, or conditions of any kind, whether express or implied. AWS responsibilities and liabilities to its customers are controlled by AWS agreements, and this Guidance is not part of, nor does it modify, any agreement between AWS and its customers.*
 
-## FAQ, Known Issues, Additional Considerations, and Limitations
+---
 
-### Known issues
+## FAQ and Known Issues
 
-- **Amazon Chime SDK PSTN phone-number quota.** Phone-number ordering is gated by a separate AWS service quota. If you have never ordered an Amazon Chime SDK phone number in this account, the ingress stack fails with a quota error. Request a quota increase through the Amazon Chime SDK console before re-running the deploy.
-- **AWS CodeBuild cold start.** The first deploy of the agent build stack assembles the ARM64 image from scratch (Python package resolution plus Docker layers); allow 8 to 12 minutes for the build waiter to finish.
-- **Amazon Bedrock AgentCore Runtime cold start.** Inbound calls pre-warm the agent microVM through a SigV4-signed `POST /invocations` warmup that the SIP Media Application Lambda fires before responding to Amazon Chime SDK Voice Connector, so callers no longer hear cold-start dead air. The very first call after a fresh deploy may still feel marginally slower than subsequent calls because the SIP Media Application Lambda itself has a Node.js cold-start (about 500 milliseconds) and the AgentCore Runtime's first microVM allocation runs the agent's full module-import path. Subsequent calls within the runtime's idle-session timeout window (15 minutes by default) reuse warmed microVMs.
-- **AWS Lambda runtime warnings.** During `cdk synth` and `cdk deploy`, `aws-cdk-lib` emits warnings about deprecated `NODEJS_18_X` runtimes for framework-internal custom resource handlers (`BucketDeployment`, `Vpc.restrictDefaultSecurityGroup`, and others). The `useLatestRuntimeVersion` feature flag does not cover these. Tracked upstream in [aws/aws-cdk#33626](https://github.com/aws/aws-cdk/issues/33626). The warnings are advisory; deployments succeed, and every Lambda owned by this Guidance pins `lambda.Runtime.NODEJS_24_X` explicitly.
+**Q: The AI agent says it cannot pull up the menu on the first try.**
+A: The agent must resolve a location before calling `GetMenu`. The system prompt enforces this: the agent asks for a city or zip code, calls `GeocodeAddress`, then `GetNearestLocations` to get a `locationId`, and only then calls `GetMenu`. If the agent skips this sequence and calls `GetMenu` without a `locationId`, the Lambda returns a 400 error and the agent retries.
 
-### Additional considerations
+**Q: Why does the customer ID show as `anon-XXXXXXXX` instead of the phone number?**
+A: The caller ANI is captured in `$.contactAttributes.callerPhoneNumber` by the contact flow. The Q in Connect ORCHESTRATION AI Agent reads this from the prompt context. The fallback to `anon-` is intentional for callers with no ANI (e.g. calling from a simulator or a number that blocks caller ID). Order isolation is guaranteed in both cases - each caller has a unique cart partition key in DynamoDB.
 
-- **Amazon Bedrock pricing.** Amazon Nova 2 Sonic charges per token (input and output). Output speech tokens are the dominant model-side cost driver. Monitor usage with Amazon CloudWatch and AWS Cost Explorer.
-- **Amazon Chime SDK PSTN per-minute charges.** Toll-free inbound minutes are the dominant telephony-side cost. Switching to a local Direct Inward Dialing number reduces this cost by roughly an order of magnitude.
-- **Network egress and Network Address Translation.** The agent reaches Amazon Bedrock, Amazon Chime SDK Voice Connector, Amazon S3, Amazon ECR, and Amazon CloudWatch through Network Address Translation gateways. Amazon VPC interface endpoints for Amazon S3, Amazon ECR, AWS Systems Manager, and AWS CloudWatch Logs are a valid cost optimization for steady-state traffic; they are not enabled by default.
-- **Data retention.** Per-call session state lives only in memory on the Amazon ECS on AWS Fargate task and in Amazon Bedrock AgentCore Runtime. Long-term call recording and call detail records are out of scope for this Guidance. Configure Amazon DynamoDB time-to-live on `<prefix>-Carts` for automatic cleanup of stale carts.
-- **Compliance.** Confirm that voice data handling complies with applicable regulations (such as General Data Protection Regulation, California Consumer Privacy Act, or sector-specific telephony rules) before deploying to production.
-- **Identity and Access Management.** This Guidance creates AWS Identity and Access Management roles with scoped permissions and applies `cdk-nag` at synth time. Review the policies in each AWS CDK stack to confirm they meet your organization's security requirements.
-- **Rate limiting.** Implement Amazon API Gateway throttling and consider AWS Shield Advanced on the Network Load Balancer Elastic IP addresses for production deployments.
+**Q: The ConnectAIAgentStack deploy fails or MCP tools show "Insufficient" permissions.**
+A: The security profile must be correctly associated to the AI Agent after the agent version is published. The stack handles this automatically. If you manually update the agent outside CDK, redeploy the `cn-ai-agent` stack to restore the security profile association.
 
-### Limitations
+**Q: The deploy fails with `InvalidContactFlowException`.**
+A: The `ConnectParticipantWithLexBot` block requires a non-empty `Text` parameter. The current value is `"Thank you for calling, give me a moment to connect."` Ensure this field is never empty.
 
-- **Telephony only.** The Guidance has no web user interface, mobile application, or browser client.
-- **English only.** The system prompt and menu are configured for English. Amazon Nova 2 Sonic supports additional languages that can be enabled by modifying the system prompt and adding a voice for each.
-- **No device GPS.** The agent asks the caller for a ZIP code or cross-street and uses Amazon Location Service for geocoding.
-- **One call, one Amazon Bedrock AgentCore Runtime session.** Each call runs to completion in its own session; there is no cross-call state on the runtime.
-- **Single Region.** The Guidance deploys into one AWS Region. Cross-Region failover is documented under Next Steps and is not provided out of the box.
-- **US Toll Free Phone Number.** The Guidance deploys with a US Toll-Free Phone Number.
+**Q: CDK emits `UnclearLambdaEnvironment` warnings during synth.**
+A: These warnings appear when Lambda functions imported via `fromFunctionArn` use CfnParameter tokens. They are suppressed where possible and do not affect deployment.
 
-For feedback, questions, or suggestions, open an issue in the repository.
+**Q: Can multiple callers order simultaneously?**
+A: Yes. Each caller gets a unique `customerId` and therefore a unique DynamoDB partition key (`CUSTOMER#{customerId}`). Cart and order data are fully isolated per caller.
 
-## Revisions
-
-- **v3.1.0 (May 2026)** — Cold-start mitigation, prompt-rendering pipeline, and operator ergonomics. The Session Initiation Protocol Media Application Lambda issues a SigV4-signed warmup `POST /invocations` to Amazon Bedrock AgentCore Runtime with a deterministic session identifier derived from the caller's phone number, allowing the agent container to do the per-call setup work (system prompt resolution, Amazon Nova 2 Sonic stream open, Model Context Protocol tool discovery) inside the ringing window before the bridged Session Initiation Protocol INVITE arrives. The Session Initiation Protocol gateway reuses the same session identifier on its WebSocket connection so the call attaches to the pre-warmed microVM. Brand identity is now a deploy-time variable: the `--company-name` flag threads through AWS Cloud Development Kit context and substitutes a `{BUSINESS_NAME}` placeholder in both system prompts at synth time. The `GetPreviousOrders` Lambda now enriches each order row with location address fields via `BatchGetCommand` so the agent can reference previous pickup locations by street name rather than an internal identifier. Both system prompts moved to AWS Systems Manager Parameter Store Advanced tier to fit a strengthened "no internal identifiers" guard and per-tool filler-phrase guidance. The deploy script auto-recovers the deployment prefix from the local state file when the operator omits the flag.
-- **v3.0.0 (May 2026)** — Architecture pivot to Real-time Transport Protocol direct from Amazon Chime SDK Voice Connector to the Amazon ECS on AWS Fargate task's auto-assigned public IP address. The Network Load Balancer carries Session Initiation Protocol on Transmission Control Protocol port 5060 only; media bypasses the load balancer entirely. Two-IP-split between the SIP Contact header (Network Load Balancer Elastic IP) and the SDP `c=` line (task public IP). Twenty-second silence-frame keepalive on the agent side prevents the Amazon Nova 2 Sonic fifty-five-second server-side idle timeout.
-- **v2.0.0 (May 2026)** — drachtio-server SIP gateway on Amazon ECS on AWS Fargate replaces the previous Amazon Kinesis Video Streams plus Amazon Chime SDK PlayAudio architecture. SigV4-signed WebSocket between the SIP gateway and Amazon Bedrock AgentCore Runtime carries audio in both directions. Eleven AWS CDK stacks, all owned by this project, with no external reference-project dependency.
-- **v1.0.0 (April 2026)** — Initial release. Amazon Bedrock AgentCore Runtime with `protocolConfiguration = HTTP` and `networkMode = VPC`. Single ARM64 container per call read Amazon Kinesis Video Streams and wrote Amazon Chime SDK `PlayAudio` directly. Five AWS CDK stacks: `NetworkStack`, `AgentEcrStack`, `AgentBuildStack`, `AgentRuntimeStack`, `IngressStack`. Python 3.13 agent and Node.js 24.x Lambdas.
+---
 
 ## Authors
 
 - Sergio Barraza, Senior TAM
-- Salman Ahmed, Senior TAM
 - Ravi Kumar, Senior TAM
+- Salman Ahmed, Senior TAM

@@ -42,11 +42,13 @@ exports.handler = async (event) => {
       typeof body.channel === 'string' && body.channel.length > 0
         ? body.channel
         : 'web';
-    // anonymousCaller: strictly boolean; `=== true` coercion.
-    const anonymousCaller = body.anonymousCaller === true;
-    // fromPhoneNumber: string; validated based on anonymousCaller flag.
+    // anonymousCaller: if not explicitly provided, infer from fromPhoneNumber.
+    // If fromPhoneNumber is empty/missing, treat as anonymous caller.
     const fromPhoneNumberRaw =
       typeof body.fromPhoneNumber === 'string' ? body.fromPhoneNumber : '';
+    const anonymousCaller =
+      body.anonymousCaller === true ||
+      (body.anonymousCaller === undefined && fromPhoneNumberRaw === '');
 
     if (!customerId || !locationId) {
       return jsonResponse(400, {

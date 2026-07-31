@@ -3,7 +3,7 @@
  * Cleanup synthetic data from DynamoDB.
  *
  * Ported from reference-project/backend/synthetic-data/cleanup-data.js.
- * Only change: table names come from cdk-outputs/tel-ddb.json keyed on
+ * Only change: table names come from cdk-outputs/cn-ddb.json keyed on
  * "DynamoDBStack" (vs the reference's "QSR-DynamoDBStack").
  *
  * Usage:
@@ -34,7 +34,7 @@ function ask(prompt) {
 function closeRl() { if (rl) { rl.close(); rl = null; } }
 
 function loadTableNames(workspaceRoot) {
-  const outputsPath = path.join(workspaceRoot, 'cdk-outputs', 'tel-ddb.json');
+  const outputsPath = path.join(workspaceRoot, 'cdk-outputs', 'cn-ddb.json');
   if (!fs.existsSync(outputsPath)) { fail(`Deployment outputs not found at: ${outputsPath}`); return null; }
   let outputs;
   try { outputs = JSON.parse(fs.readFileSync(outputsPath, 'utf-8')); } catch (e) { fail(`Failed to parse: ${e.message}`); return null; }
@@ -46,7 +46,7 @@ function loadTableNames(workspaceRoot) {
     orders: ddb.OrdersTableName,
   };
   for (const [k, v] of Object.entries(tables)) {
-    if (!v) { fail(`Missing ${k}TableName in tel-ddb.json`); return null; }
+    if (!v) { fail(`Missing ${k}TableName in cn-ddb.json`); return null; }
   }
   return tables;
 }
