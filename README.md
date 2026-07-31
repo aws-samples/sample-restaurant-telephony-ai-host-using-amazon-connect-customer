@@ -70,12 +70,12 @@ One stack creates the contact flow and claims the phone number. The contact flow
 
 When a call arrives, the contact flow executes six blocks in sequence:
 
-1. **UpdateFlowLoggingBehavior** - enables Contact Lens flow logging to CloudWatch.
-2. **UpdateContactAttributes** - copies `$.CustomerEndpoint.Address` (the caller's ANI) into the contact attribute `callerPhoneNumber`.
+1. **Enable logging** - turns on Contact Lens flow logging so every step is recorded in CloudWatch for debugging.
+2. **Capture caller phone number** - records the caller's phone number from the incoming call so the AI agent can use it to identify the customer.
 3. **CreateWisdomSession** - opens a Q in Connect session tied to the assistant ARN. This step is mandatory - without it, Amazon Lex V2 returns "Lex needs active session for Q In Connect".
-4. **UpdateContactData** - stores the Q in Connect session ARN in the contact for downstream use.
+4. **Store session** - saves the Q in Connect session so it can be referenced throughout the rest of the call.
 5. **ConnectParticipantWithLexBot** - plays the greeting *"Thank you for calling, give me a moment to connect."* and hands the call to the Amazon Lex V2 bot alias.
-6. **Compare (CheckTool)** - reads `$.Lex.SessionAttributes.Tool` after the bot returns. Routes to `DisconnectParticipant` on `Complete` or `Escalate`.
+6. **Check outcome** - after the AI agent finishes, reads the result (Complete or Escalate) and ends the call accordingly.
 
 ### AI Agent Conversation
 
