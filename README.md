@@ -197,8 +197,8 @@ npx cdk bootstrap aws://<ACCOUNT_ID>/<REGION>
 The script `scripts/deploy-all.sh` deploys all eight stacks in dependency order and seeds synthetic data into DynamoDB.
 
 ```bash
-git clone https://github.com/aws-samples/sample-restaurant-amazon-connect-telephony-ai-host-using-amazon-bedrock-agentcore.git
-cd sample-restaurant-amazon-connect-telephony-ai-host-using-amazon-bedrock-agentcore
+git clone https://github.com/aws-samples/sample-restaurant-telephony-ai-host-using-amazon-connect-customer.git
+cd sample-restaurant-telephony-ai-host-using-amazon-connect-customer
 
 ./scripts/deploy-all.sh --deploymentPrefix qsr-cn
 ```
