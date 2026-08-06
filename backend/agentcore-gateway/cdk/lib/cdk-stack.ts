@@ -145,6 +145,7 @@ export class CdkStack extends cdk.Stack {
         'bedrock-agentcore:ListGatewayTargets',
         'bedrock-agentcore:CreateWorkloadIdentity',
         'bedrock-agentcore:ListWorkloadIdentities',
+        'bedrock-agentcore:DeleteWorkloadIdentity',
       ],
       resources: ['*'],
     }));

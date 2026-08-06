@@ -84,7 +84,10 @@ export class ApiGatewayStack extends cdk.Stack {
     // after the RestApi is constructed so we know `this.api.restApiId` is
     // available.
     const fn = (id: string, arnParam: cdk.CfnParameter) =>
-      lambda.Function.fromFunctionArn(this, id, arnParam.valueAsString);
+      lambda.Function.fromFunctionAttributes(this, id, {
+        functionArn: arnParam.valueAsString,
+        sameEnvironment: true,
+      });
 
     const getCustomerProfile = fn(
       'GetCustomerProfileRef',

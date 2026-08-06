@@ -72,8 +72,8 @@ export class ConnectInstanceStack extends cdk.Stack {
     });
 
     // ─── Connect Customer enabler (Custom Resource) ───────────────────────────
-    // Enables ENHANCED_CONTACT_MONITORING (Q in Connect AI) and BOT_MANAGEMENT
-    // (Nova Sonic generative engine) on the Connect instance.
+    // Enables ENHANCED_CONTACT_MONITORING (Connect AI Agents) and BOT_MANAGEMENT
+    // (required for Lex bots with Agentic Voice) on the Connect instance.
     const enablerLogGroup = new logs.LogGroup(this, 'ConnectCustomerEnablerLogGroup', {
       logGroupName: cdk.Fn.sub('/aws/lambda/${P}-connect-customer-enabler', { P: prefix }),
       retention: logs.RetentionDays.ONE_MONTH,

@@ -8,6 +8,8 @@
     - [Contact Flow](#contact-flow)
     - [AI Agent Conversation](#ai-agent-conversation)
     - [Tool Execution](#tool-execution)
+    - [Agentic Voice - Advanced ASR](#agentic-voice---advanced-asr)
+    - [AI Guardrails](#ai-guardrails)
 4. [Cost](#cost)
 5. [Prerequisites](#prerequisites)
 6. [Automated Deployment](#automated-deployment)
@@ -23,19 +25,20 @@
 
 ## Overview
 
-This guidance demonstrates how to build a fully voice-driven ordering system for quick-service restaurants (QSR) using **Amazon Connect** as the telephony layer and **Amazon Q in Connect** as the AI orchestration layer. A caller dials a standard phone number, speaks naturally, and the AI agent takes the order end-to-end - no apps, no screens, no sign-in required.
+This guidance demonstrates how to build a fully voice-driven ordering system for quick-service restaurants (QSR) using **Amazon Connect** as the telephony layer and **Amazon Connect AI Agents** as the orchestration layer. A caller dials a standard phone number, speaks naturally, and the AI agent takes the order end-to-end - no apps, no screens, no sign-in required.
 
 **Key services used:**
 
 | Service | Role |
 |---|---|
 | **Amazon Connect** | Inbound telephony, contact flow, phone number |
-| **Amazon Lex V2** | Speech-to-speech interface using the Nova Sonic generative engine |
-| **Amazon Q in Connect** | ORCHESTRATION AI Agent (Claude Haiku 4.5) - reasoning, tool calls, conversation |
+| **Amazon Lex V2** | Speech interface with Amazon Connect Agentic Voice (Advanced ASR + TTS) |
+| **Amazon Connect AI Agents** | ORCHESTRATION AI Agent (Claude Haiku 4.5) - reasoning, tool calls, conversation |
+| **Amazon Connect AI Guardrails** | Content safety - filters harmful content, blocks off-topic discussions, profanity |
 | **Amazon Bedrock AgentCore Gateway** | MCP server exposing backend REST APIs as discoverable tools |
 | **Amazon AppIntegrations** | Registers the AgentCore Gateway as an MCP application |
 | **Amazon API Gateway** | REST API (`prod` stage, AWS_IAM authorization) |
-| **AWS Lambda** | Ten Node.js 24.x ordering functions |
+| **AWS Lambda** | Eleven Node.js functions (ten ordering + one session data push) |
 | **Amazon DynamoDB** | Five tables: Customers, Orders, Menu, Carts, Locations |
 | **Amazon Location Service** | Geocoding (place index) and route calculation |
 | **AWS CDK** | All infrastructure as code, eight CloudFormation stacks |
@@ -57,10 +60,10 @@ Four stacks deploy the ordering backend: DynamoDB tables, Location Service resou
 One stack provisions an Amazon Bedrock AgentCore Gateway with CUSTOM_JWT authorization. The gateway reads the OpenAPI schema from the REST API at deploy time, registers each endpoint as a named MCP tool, and validates inbound JWTs against the Connect instance's JWKS discovery endpoint.
 
 **Section C - Connect Instance and AI Agent**
-Two stacks create the Amazon Connect instance (with Contact Lens and bot management enabled), the Amazon Q in Connect assistant, and the ORCHESTRATION AI Agent. The agent stack registers the AgentCore Gateway as an MCP server in Amazon AppIntegrations, creates an Amazon Lex V2 bot with the Nova Sonic generative engine, defines the ORCHESTRATION AI Agent with the Claude Haiku 4.5 system prompt, publishes the agent version, and associates a security profile that grants the agent access to all ten MCP tools.
+Two stacks create the Amazon Connect instance (with Contact Lens and bot management enabled), the Amazon Connect AI Agents assistant, and the ORCHESTRATION AI Agent. The agent stack registers the AgentCore Gateway as an MCP server in Amazon AppIntegrations, creates an Amazon Lex V2 bot with Amazon Connect Agentic Voice (Advanced ASR for speech recognition), defines the AI Guardrail with content safety policies, defines the ORCHESTRATION AI Agent with the Claude Haiku 4.5 system prompt and guardrail attached, publishes the agent version, and associates a security profile that grants the agent access to all ten MCP tools.
 
 **Section D - Connect Telephony**
-One stack creates the contact flow and claims the phone number. The contact flow is the entry point for every inbound call - it enables logging, captures the caller's phone number (ANI) as a contact attribute, opens a Q in Connect session tied to the assistant, stores the session ARN, plays the greeting to the caller, and hands the call to the Amazon Lex V2 bot. When the AI agent finishes and fires `Complete` or `Escalate`, the Lex bot returns control to the contact flow which reads the result from the Lex session attributes and disconnects the call. The phone number is claimed and associated to the contact flow as part of the same stack deployment.
+One stack creates the contact flow and claims the phone number. The contact flow is the entry point for every inbound call - it enables logging, sets the Agentic Voice (TTS), captures the caller's phone number (ANI) as a contact attribute, opens an Amazon Connect AI Agents session tied to the assistant, stores the session ARN, pushes the caller phone number into the AI Agent session via a Lambda function (so the agent can identify the caller), plays the greeting, and connects the caller to the Amazon Lex V2 bot. The Lex bot provides the real-time speech layer (Agentic Voice Advanced ASR for listening, Agentic Voice TTS for speaking) while the AI Agent handles all reasoning and tool calling throughout the conversation. When the AI agent finishes and fires `Complete` or `Escalate`, the Lex bot returns control to the contact flow which reads the result from the Lex session attributes and disconnects the call. The phone number is claimed and associated to the contact flow as part of the same stack deployment.
 
 ---
 
@@ -68,18 +71,20 @@ One stack creates the contact flow and claims the phone number. The contact flow
 
 ### Contact Flow
 
-When a call arrives, the contact flow executes six blocks in sequence:
+When a call arrives, the contact flow executes eight blocks in sequence:
 
 1. **Enable logging** - turns on Contact Lens flow logging so every step is recorded in CloudWatch for debugging.
-2. **Capture caller phone number** - records the caller's phone number from the incoming call so the AI agent can use it to identify the customer.
-3. **CreateWisdomSession** - opens a Q in Connect session tied to the assistant ARN. This step is mandatory - without it, Amazon Lex V2 returns "Lex needs active session for Q In Connect".
-4. **Store session** - saves the Q in Connect session so it can be referenced throughout the rest of the call.
-5. **ConnectParticipantWithLexBot** - plays the greeting *"Thank you for calling, give me a moment to connect."* and hands the call to the Amazon Lex V2 bot alias.
-6. **Check outcome** - after the AI agent finishes, reads the result (Complete or Escalate) and ends the call accordingly.
+2. **Set Voice** - configures the Agentic Voice TTS engine (`connect:agentic`) with the chosen voice for the entire call.
+3. **Capture caller phone number** - records the caller's phone number from the incoming call as a contact attribute.
+4. **CreateWisdomSession** - opens an Amazon Connect AI Agents session tied to the assistant ARN. This step is mandatory - without it, the Lex bot returns "Lex needs active session for Q In Connect".
+5. **Store session** - saves the session ARN so it can be referenced throughout the rest of the call.
+6. **Push session data (Lambda)** - invokes a Lambda function that calls `UpdateSessionData` to push the caller's phone number into the AI Agent session as `Custom.callerPhoneNumber`. This enables the AI Agent to identify the caller without asking.
+7. **ConnectParticipantWithLexBot** - plays the greeting *"Thank you for calling, give me a moment to connect."* and connects the caller to the Amazon Lex V2 bot. From this point, the Lex bot provides the real-time speech layer (Agentic Voice Advanced ASR listens and detects end-of-turn, Agentic Voice TTS generates expressive voice responses) while the AI Agent handles all reasoning and tool execution autonomously until the conversation ends.
+8. **Check outcome** - after the AI agent finishes, reads the result (Complete or Escalate) and ends the call accordingly.
 
 ### AI Agent Conversation
 
-The Amazon Q in Connect ORCHESTRATION AI Agent (Claude Haiku 4.5 - model ID `us.anthropic.claude-haiku-4-5-20251001-v1:0`) drives all conversation turns. The system prompt is configured for voice - responses are kept concise, prices are spoken naturally ("five ninety-nine"), and internal system identifiers are never exposed to the caller. The prompt instructs it to:
+The ORCHESTRATION AI Agent (Claude Haiku 4.5 - model ID `us.anthropic.claude-haiku-4-5-20251001-v1:0`) drives all conversation turns. The system prompt is configured for voice - responses are kept concise, prices are spoken naturally ("five ninety-nine"), and internal system identifiers are never exposed to the caller. The prompt instructs it to:
 
 **Ordering workflow:**
 1. Greet the caller: *"Hello, welcome to {CompanyName}! What can I get started for you today?"*
@@ -94,7 +99,7 @@ The Amazon Q in Connect ORCHESTRATION AI Agent (Claude Haiku 4.5 - model ID `us.
 
 When the agent calls a tool, the request flows:
 
-**Amazon Q in Connect** → **Amazon Bedrock AgentCore Gateway** (MCP, CUSTOM_JWT auth) → **Amazon API Gateway** (REST, AWS_IAM, `prod` stage) → **AWS Lambda** → **Amazon DynamoDB / Amazon Location Service**
+**Amazon Connect AI Agents** → **Amazon Bedrock AgentCore Gateway** (MCP, CUSTOM_JWT auth) → **Amazon API Gateway** (REST, AWS_IAM, `prod` stage) → **AWS Lambda** → **Amazon DynamoDB / Amazon Location Service**
 
 The ten available MCP tools (all `MODEL_CONTEXT_PROTOCOL` type):
 
@@ -115,6 +120,114 @@ Plus two `RETURN_TO_CONTROL` tools: `Complete` and `Escalate`.
 
 **Cart and order isolation:** Each caller has their own isolated cart. Concurrent calls cannot interfere with each other. The cart is automatically cleared after a successful order is placed.
 
+### Agentic Voice - Advanced ASR
+
+The Lex bot locale is configured with Amazon Connect Agentic Voice **Advanced ASR** (`speechRecognitionSettings.speechModelPreference: 'Advanced'`). The bot locale's `voiceSettings` is intentionally omitted so that the contact flow's Set Voice block (using `connect:agentic` engine) controls TTS. This enables confidence-based end-of-turn detection rather than relying solely on silence timeouts.
+
+**How it improves the experience:**
+
+- **Faster turn-taking** - The Advanced ASR model actively analyzes speech patterns and predicts when the caller has finished speaking. Instead of waiting for a fixed silence window (640ms default), it fires the turn as soon as it reaches confidence that the caller is done.
+- **Reduced perceived latency** - The dead time between the caller finishing their sentence and the system beginning to process is shorter, making the conversation feel more natural.
+- **Configurable thresholds** - End-of-turn confidence (default 0.7, range 0.5-0.9) and silence timeout (default 640ms, range 500-10,000ms) can be tuned per intent/slot via Lex session attributes for specific scenarios like collecting payment card numbers or addresses.
+
+**Architecture:**
+
+```
+Caller speaks → Agentic Voice Advanced ASR handles speech recognition + end-of-turn detection
+             → Lex bot routes to AMAZON.QInConnectIntent
+             → ORCHESTRATION AI Agent reasons and calls MCP tools
+             → Agentic Voice TTS speaks the response (via Set Voice block)
+```
+
+The full speech pipeline uses Amazon Connect Agentic Voice for both ASR (input) and TTS (output). The bot locale has no `voiceSettings` — TTS is controlled entirely by the Set Voice block in the contact flow with engine `connect:agentic`.
+
+**CDK configuration (bot locale):**
+
+```typescript
+botLocales: [{
+  localeId: 'en_US',
+  // voiceSettings intentionally OMITTED — TTS controlled by Set Voice block
+  speechRecognitionSettings: { speechModelPreference: 'Advanced' },
+  // ...
+}]
+```
+
+**CDK configuration (Set Voice block in contact flow):**
+
+```typescript
+{
+  Identifier: 'SetVoice',
+  Type: 'UpdateContactTextToSpeechVoice',
+  Parameters: {
+    TextToSpeechVoice: 'RONALD',       // or KATIE, BLAKE, BROOKE, GEMMA
+    TextToSpeechEngine: 'connect:agentic',
+  },
+}
+```
+
+For fine-grained control, set session attributes in your contact flow or fulfillment Lambda:
+
+```json
+{
+  "x-amz-lex:audio:end-confidence-threshold:*:*": "0.8",
+  "x-amz-lex:audio:end-timeout-ms:*:*": "800",
+  "x-amz-lex:allow-interrupt:*:*": "true"
+}
+```
+
+For more details, see [Agentic voice best practices](https://docs.aws.amazon.com/connect/latest/adminguide/agentic-voice-best-practices.html).
+
+### AI Guardrails
+
+The ORCHESTRATION AI Agent has an **AI Guardrail** attached that enforces content safety policies. The guardrail is created as a native `AWS::Wisdom::AIGuardrail` resource and versioned via `AWS::Wisdom::AIGuardrailVersion`, then associated to the agent through the `OrchestrationAIGuardrailId` property.
+
+**Policies configured:**
+
+| Policy type | Configuration |
+|---|---|
+| **Content filters** | Hate, Insults, Sexual, Violence, Misconduct: HIGH strength (input + output). Prompt Attack: MEDIUM input only. |
+| **Denied topics** | Political discussions, Financial investment advice |
+| **Word filters** | Built-in profanity list + custom word list |
+| **Blocked message** | "I am sorry, I can only help with restaurant orders. Is there anything else I can get for you?" |
+
+**Behavior:** When a caller says something off-topic (e.g., "What do you think about the election?" or "Is your food better than McDonalds?"), the guardrail intervenes and the agent responds with the blocked message, then redirects the conversation back to ordering.
+
+**CDK configuration:**
+
+```typescript
+const aiGuardrail = new wisdom.CfnAIGuardrail(this, 'RestaurantGuardrail', {
+  assistantId: assistantId.valueAsString,
+  name: 'restaurantguardrail',
+  blockedInputMessaging: 'I am sorry, I can only help with restaurant orders.',
+  blockedOutputsMessaging: 'I am sorry, I can only help with restaurant orders.',
+  contentPolicyConfig: {
+    filtersConfig: [
+      { type: 'HATE', inputStrength: 'HIGH', outputStrength: 'HIGH' },
+      { type: 'PROMPT_ATTACK', inputStrength: 'HIGH', outputStrength: 'NONE' },
+      // ...
+    ],
+  },
+  topicPolicyConfig: { topicsConfig: [/* denied topics */] },
+  wordPolicyConfig: { managedWordListsConfig: [{ type: 'PROFANITY' }], wordsConfig: [{ text: '...' }] },
+});
+
+// Publish version and attach to agent
+const version = new wisdom.CfnAIGuardrailVersion(this, 'GuardrailVersion', {
+  aiGuardrailId: aiGuardrail.attrAiGuardrailId,
+  assistantId: assistantId.valueAsString,
+});
+
+// In the AI Agent configuration:
+orchestrationAiGuardrailId: version.attrAiGuardrailVersionId,
+```
+
+**Important CDK notes:**
+- Stack-level tags must be removed from the `CfnAIGuardrail` resource (`cdk.Tags.of(guardrail).remove(...)`) - the `CreateAIGuardrail` API rejects the tag format that CloudFormation sends.
+- `wordPolicyConfig.wordsConfig` must not be empty - include at least one entry to prevent the CFN handler from sending an empty array which the API rejects.
+- The guardrail version ID (`attrAiGuardrailVersionId`) already includes the required version qualifier - no manual `Fn::Join` needed.
+
+For more details, see [Create AI guardrails for Connect AI agents](https://docs.aws.amazon.com/connect/latest/adminguide/create-ai-guardrails.html).
+
 ---
 
 ## Cost
@@ -126,7 +239,6 @@ Create a [Budget](https://docs.aws.amazon.com/cost-management/latest/userguide/b
 | AWS service | Dimensions | Cost [USD] |
 |---|---|---|
 | [Amazon Connect - inbound DID minutes](https://aws.amazon.com/connect/pricing/) | 5,000 inbound minutes at $0.0018/min | $9.00 |
-| [Amazon Bedrock - Nova Sonic (via Lex)](https://aws.amazon.com/bedrock/pricing/) | ~5,763 speech tokens/session × 1,000 sessions | $12.50 |
 | [Amazon Bedrock - Claude Haiku 4.5 (orchestration)](https://aws.amazon.com/bedrock/pricing/) | ~8,698 text tokens/session × 1,000 sessions | $7.50 |
 | [Amazon Lex V2](https://aws.amazon.com/lex/pricing/) | 5,000 speech requests | $2.50 |
 | [Amazon Connect - phone number](https://aws.amazon.com/connect/pricing/) | 1 DID phone number | $1.00 |
@@ -161,17 +273,17 @@ No Docker, Python, or additional runtimes are required.
 
 ### AWS account requirements
 
-- IAM permissions to create resources in: Amazon Connect, Amazon Lex V2, Amazon Q in Connect, Amazon Bedrock AgentCore Gateway, AWS Lambda, Amazon DynamoDB, Amazon Location Service, Amazon API Gateway, Amazon CloudWatch Logs, Amazon AppIntegrations, and AWS IAM.
+- IAM permissions to create resources in: Amazon Connect, Amazon Lex V2, Amazon Connect AI Agents, Amazon Bedrock AgentCore Gateway, AWS Lambda, Amazon DynamoDB, Amazon Location Service, Amazon API Gateway, Amazon CloudWatch Logs, Amazon AppIntegrations, and AWS IAM.
 
-- **Amazon Bedrock model access - Amazon Nova Sonic** (`amazon.nova-2-sonic-v1:0`). Required for the Amazon Lex V2 generative (speech-to-speech) engine. Request access through the [Amazon Bedrock console](https://console.aws.amazon.com/bedrock/) model access page.
 
-- **Amazon Bedrock model access - Anthropic Claude Haiku 4.5** (`us.anthropic.claude-haiku-4-5-20251001-v1:0`). Required for the Q in Connect ORCHESTRATION AI Agent. Request access through the [Amazon Bedrock console](https://console.aws.amazon.com/bedrock/) model access page.
+
+- **Amazon Bedrock model access - Anthropic Claude Haiku 4.5** (`us.anthropic.claude-haiku-4-5-20251001-v1:0`). Required for the ORCHESTRATION AI Agent. Request access through the [Amazon Bedrock console](https://console.aws.amazon.com/bedrock/) model access page.
 
 - **Amazon Connect phone number quota ≥ 1**. If you have never claimed an Amazon Connect phone number in this account and Region, request a quota increase through the [Service Quotas console](https://console.aws.amazon.com/servicequotas/) before deployment.
 
-- **`BOT_MANAGEMENT` instance attribute** - enabled automatically by the `ConnectInstanceStack` custom resource Lambda. Without it, the Amazon Lex V2 Nova Sonic generative engine returns an error.
+- **`BOT_MANAGEMENT` instance attribute** - enabled automatically by the `ConnectInstanceStack` custom resource Lambda. Required for Lex bots with Agentic Voice in Connect.
 
-- **`CONTACT_LENS` instance attribute** - enabled by the `ConnectInstanceStack` CDK definition (`contactLens: true`). Required for Amazon Q in Connect AI Agent voice interactions.
+- **`CONTACT_LENS` instance attribute** - enabled by the `ConnectInstanceStack` CDK definition (`contactLens: true`). Required for Amazon Connect AI Agents AI Agent voice interactions.
 
 ### AWS CDK bootstrap
 
@@ -185,9 +297,9 @@ npx cdk bootstrap aws://<ACCOUNT_ID>/<REGION>
 
 `us-east-1` (US East, N. Virginia) is the recommended and tested Region. Several stack resources are configured for `us-east-1`. Before deploying to another Region, verify that all of the following are available there:
 
-- Amazon Bedrock - Nova Sonic (`amazon.nova-2-sonic-v1:0`)
+- Amazon Connect Agentic Voice (enabled via Connect Customer)
 - Amazon Bedrock - Claude Haiku 4.5 (`us.anthropic.claude-haiku-4-5-20251001-v1:0`)
-- Amazon Connect with Q in Connect ORCHESTRATION AI Agent type
+- Amazon Connect with ORCHESTRATION AI Agent type
 - Amazon Bedrock AgentCore Gateway
 
 ---
@@ -197,8 +309,8 @@ npx cdk bootstrap aws://<ACCOUNT_ID>/<REGION>
 The script `scripts/deploy-all.sh` deploys all eight stacks in dependency order and seeds synthetic data into DynamoDB.
 
 ```bash
-git clone https://github.com/aws-samples/sample-restaurant-telephony-ai-host-using-amazon-connect-customer.git
-cd sample-restaurant-telephony-ai-host-using-amazon-connect-customer
+git clone https://github.com/aws-samples/sample-restaurant-amazon-connect-telephony-ai-host-using-amazon-bedrock-agentcore.git
+cd sample-restaurant-amazon-connect-telephony-ai-host-using-amazon-bedrock-agentcore
 
 ./scripts/deploy-all.sh --deploymentPrefix qsr-cn
 ```
@@ -237,9 +349,9 @@ Your restaurant AI host is live at +1XXXXXXXXXX - dial to test.
 3. **LambdaStack** - ten Node.js 24.x Lambda ordering functions
 4. **ApiGatewayStack** - REST API (`prod` stage, AWS_IAM)
 5. Synthetic data - menu items, restaurant locations, optional loyalty customer
-6. **ConnectInstanceStack** - Connect instance, Q in Connect assistant
+6. **ConnectInstanceStack** - Connect instance, Amazon Connect AI Agents assistant
 7. **AgentCoreGatewayStack** - AgentCore Gateway with MCP + CUSTOM_JWT
-8. **ConnectAIAgentStack** - Lex bot, ORCHESTRATION AI Agent, security profile
+8. **ConnectAIAgentStack** - Lex bot, AI Guardrail, ORCHESTRATION AI Agent, security profile
 9. **ConnectTelephonyStack** - contact flow, phone number
 
 Cross-stack identifiers are threaded via `cdk-outputs/*.json` files using `--parameters Stack:Key=Value`. There are no CloudFormation cross-stack exports.
@@ -301,7 +413,7 @@ Dial the phone number printed at the end of `deploy-all.sh`. No browser, app, or
 
 ```
 Agent:  Thank you for calling, give me a moment to connect.
-        [Q in Connect session starts - agent greets]
+        [AI Agents session starts - agent greets]
         Hello, welcome to Amazing Burgers! What can I get started
         for you today?
 
@@ -316,6 +428,12 @@ Agent:  [Calls GeocodeAddress, GetNearestLocations, GetMenu]
         McKinney Avenue in Dallas. We have a Classic Burger for
         five ninety-nine and a Deluxe Burger for eight ninety-nine.
         What would you like?
+
+Caller: What do you think about the election?
+
+Agent:  [Guardrail intervenes - denied topic: Political Discussions]
+        I am sorry, I can only help with restaurant orders. Is there
+        anything else I can get for you?
 
 Caller: Classic Burger and a fountain drink.
 
@@ -336,7 +454,7 @@ Agent:  [Calls PlaceOrder]
 | Log source | Where to look |
 |---|---|
 | Contact flow | CloudWatch Logs: `/aws/connect/<prefix>-restaurant` |
-| Q in Connect AI Agent | CloudWatch Logs: `/aws/bedrock-agentcore/runtimes/<runtime>` |
+| Amazon Connect AI Agent | CloudWatch Logs: `/aws/bedrock-agentcore/runtimes/<runtime>` |
 | Lambda functions | CloudWatch Logs: `/aws/lambda/<prefix>-<function>` |
 | API Gateway access | CloudWatch Logs: `/aws/apigateway/<prefix>-api-access-logs` |
 
@@ -353,8 +471,8 @@ Agent:  [Calls PlaceOrder]
 The script destroys stacks in this order (reverse of deploy):
 
 1. `ConnectTelephonyStack` - releases the phone number, deletes the contact flow
-2. `ConnectAIAgentStack` - disassociates security profiles, deletes the AI Agent, Lex bot, system prompt, AppIntegrations application
-3. `ConnectInstanceStack` - deletes the Connect instance and Q in Connect assistant
+2. `ConnectAIAgentStack` - disassociates security profiles, deletes the AI Agent, AI Guardrail, Lex bot, system prompt, AppIntegrations application
+3. `ConnectInstanceStack` - deletes the Connect instance and Amazon Connect AI Agents assistant
 4. `AgentCoreGatewayStack` - deletes the AgentCore Gateway, target, and gateway IAM service role
 5. `ApiGatewayStack` - deletes the REST API
 6. `LambdaStack` - deletes the ten Lambda functions
@@ -377,7 +495,7 @@ Verify in the [AWS CloudFormation console](https://console.aws.amazon.com/cloudf
 A: The agent must resolve a location before calling `GetMenu`. The system prompt enforces this: the agent asks for a city or zip code, calls `GeocodeAddress`, then `GetNearestLocations` to get a `locationId`, and only then calls `GetMenu`. If the agent skips this sequence and calls `GetMenu` without a `locationId`, the Lambda returns a 400 error and the agent retries.
 
 **Q: Why does the customer ID show as `anon-XXXXXXXX` instead of the phone number?**
-A: The caller ANI is captured in `$.contactAttributes.callerPhoneNumber` by the contact flow. The Q in Connect ORCHESTRATION AI Agent reads this from the prompt context. The fallback to `anon-` is intentional for callers with no ANI (e.g. calling from a simulator or a number that blocks caller ID). Order isolation is guaranteed in both cases - each caller has a unique cart partition key in DynamoDB.
+A: The caller ANI is captured in `$.contactAttributes.callerPhoneNumber` by the contact flow. The ORCHESTRATION AI Agent reads this from the prompt context. The fallback to `anon-` is intentional for callers with no ANI (e.g. calling from a simulator or a number that blocks caller ID). Order isolation is guaranteed in both cases - each caller has a unique cart partition key in DynamoDB.
 
 **Q: The ConnectAIAgentStack deploy fails or MCP tools show "Insufficient" permissions.**
 A: The security profile must be correctly associated to the AI Agent after the agent version is published. The stack handles this automatically. If you manually update the agent outside CDK, redeploy the `cn-ai-agent` stack to restore the security profile association.
@@ -387,6 +505,9 @@ A: The `ConnectParticipantWithLexBot` block requires a non-empty `Text` paramete
 
 **Q: CDK emits `UnclearLambdaEnvironment` warnings during synth.**
 A: These warnings appear when Lambda functions imported via `fromFunctionArn` use CfnParameter tokens. They are suppressed where possible and do not affect deployment.
+
+**Q: The `ConnectTelephonyStack` deploy fails with "Phone number not available."**
+A: This can happen when a previously released phone number hasn't cleared the pool yet. Retry the deploy - CloudFormation will claim a different available number. This is a rare timing issue that only occurs when you release and immediately re-claim in the same Region.
 
 **Q: Can multiple callers order simultaneously?**
 A: Yes. Each caller gets a unique `customerId` and therefore a unique DynamoDB partition key (`CUSTOMER#{customerId}`). Cart and order data are fully isolated per caller.

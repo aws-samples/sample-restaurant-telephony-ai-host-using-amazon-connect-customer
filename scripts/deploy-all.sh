@@ -453,7 +453,8 @@ if should_deploy "cn-telephony"; then
     "ConnectTelephonyStack:LexBotId=$(json_val cn-ai-agent.json ConnectAIAgentStack LexBotId)" \
     "ConnectTelephonyStack:LexBotAliasId=$(json_val cn-ai-agent.json ConnectAIAgentStack LexBotAliasId)" \
     "ConnectTelephonyStack:PhoneCountryCode=${PHONE_COUNTRY_CODE}" \
-    "ConnectTelephonyStack:PhoneType=${PHONE_TYPE}"
+    "ConnectTelephonyStack:PhoneType=${PHONE_TYPE}" \
+    "ConnectTelephonyStack:PushSessionDataFnArn=$(json_val cn-ai-agent.json ConnectAIAgentStack PushSessionDataFnArn)"
 fi
 
 ################################################################################

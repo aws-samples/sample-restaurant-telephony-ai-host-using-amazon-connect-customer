@@ -18,7 +18,7 @@ import { Construct } from 'constructs';
  *  Step 4:  LexBotRole               — Lex execution role
  *  Step 5:  RestaurantOrderingPrompt — wisdom.CfnAIPrompt
  *  Step 6:  RestaurantOrderingPromptVersion — wisdom.CfnAIPromptVersion
- *  Step 7:  OrderingBot              — lex.CfnBot (Nova Sonic, AMAZON.QInConnectIntent)
+ *  Step 7:  OrderingBot              — lex.CfnBot (Agentic Voice ASR, AMAZON.QInConnectIntent)
  *  Step 8:  OrderingBotVersion       — lex.CfnBotVersion
  *  Step 9:  OrderingBotAlias         — lex.CfnBotAlias
  *  Step 10: LexBotAssociation        — Lex bot ↔ Connect instance
@@ -159,6 +159,10 @@ export class ConnectAIAgentStack extends cdk.Stack {
         'wisdom:RemoveAssistantAIAgent',
         'wisdom:GetAIAgent',
         'wisdom:UpdateAIAgent',
+        'wisdom:CreateAIGuardrail',
+        'wisdom:DeleteAIGuardrail',
+        'wisdom:CreateAIGuardrailVersion',
+        'wisdom:GetAIGuardrail',
       ],
       resources: ['*'],
     }));
@@ -271,6 +275,48 @@ export class ConnectAIAgentStack extends cdk.Stack {
       { id: 'AwsSolutions-IAM5', reason: 'polly:SynthesizeSpeech and wisdom session ARNs require wildcard resource.' },
     ], true);
 
+    // ─── Step 4a: Push Session Data Lambda ────────────────────────────────────
+    // Invoked from the contact flow after CreateWisdomSession to push the
+    // caller's phone number into the AI Agent session as Custom.callerPhoneNumber.
+    // The AI prompt then references it as {{$.Custom.callerPhoneNumber}}.
+    const pushSessionDataFn = new cdk.aws_lambda.Function(this, 'PushSessionDataFn', {
+      functionName: cdk.Fn.sub('${P}-PushSessionData', { P: prefix }),
+      runtime: cdk.aws_lambda.Runtime.NODEJS_22_X,
+      handler: 'push-session-data.handler',
+      code: cdk.aws_lambda.Code.fromAsset('lambda'),
+      timeout: cdk.Duration.seconds(10),
+      environment: {
+        ASSISTANT_ID: assistantId.valueAsString,
+      },
+    });
+
+    pushSessionDataFn.addToRolePolicy(new iam.PolicyStatement({
+      sid: 'ConnectDescribeContact',
+      actions: ['connect:DescribeContact'],
+      resources: ['*'],
+    }));
+
+    pushSessionDataFn.addToRolePolicy(new iam.PolicyStatement({
+      sid: 'WisdomUpdateSessionData',
+      actions: ['wisdom:UpdateSessionData'],
+      resources: [
+        assistantArn.valueAsString,
+        cdk.Fn.sub('${Arn}/*', { Arn: assistantArn.valueAsString }),
+        cdk.Fn.sub('arn:aws:wisdom:${AWS::Region}:${AWS::AccountId}:session/*', {}),
+      ],
+    }));
+
+    // Allow Connect to invoke this Lambda
+    pushSessionDataFn.addPermission('ConnectInvoke', {
+      principal: new iam.ServicePrincipal('connect.amazonaws.com'),
+      sourceArn: connectInstanceArn.valueAsString,
+    });
+
+    NagSuppressions.addResourceSuppressions(pushSessionDataFn, [
+      { id: 'AwsSolutions-IAM5', reason: 'DescribeContact requires wildcard. Wisdom session ARNs are dynamic.' },
+      { id: 'AwsSolutions-IAM4', reason: 'Lambda basic execution role is CDK-managed.' },
+    ], true);
+
     // ─── Step 5: Restaurant Ordering System Prompt ────────────────────────────
     const promptText = [
       'system: |',
@@ -301,12 +347,12 @@ export class ConnectAIAgentStack extends cdk.Stack {
       '',
       '  <customer_id_setup>',
       '  At the very start of the session, before doing anything else, silently determine the customerId:',
-      '  1. Check $.contactAttributes.callerPhoneNumber.',
-      '  2. If it is a non-empty string (e.g. "+15551234567"), strip the leading "+" and use the',
-      '     digits only as the customerId. Example: "+15551234567" → customerId="15551234567".',
-      '     Also set fromPhoneNumber = $.contactAttributes.callerPhoneNumber (keep the + prefix).',
+      '  The callers phone number is: {{$.Custom.callerPhoneNumber}}',
+      '  1. If the phone number is a non-empty string (e.g. "+15551234567"), strip the leading "+" and use the',
+      '     digits only as the customerId. Example: "+15551234567" -> customerId="15551234567".',
+      '     Also set fromPhoneNumber to the phone number value (keep the + prefix).',
       '     Set anonymousCaller = false.',
-      '  3. If the attribute is missing or empty, generate a unique session ID:',
+      '  2. If the phone number is empty or not available, generate a unique session ID:',
       '     customerId = "anon-" + a random 8-character alphanumeric string.',
       '     Set fromPhoneNumber = "" and anonymousCaller = true.',
       '  Do NOT tell the caller about this ID. Do NOT ask the caller for their phone number.',
@@ -371,8 +417,74 @@ export class ConnectAIAgentStack extends cdk.Stack {
     });
     restaurantPromptVersion.node.addDependency(restaurantSystemPrompt);
 
+    // ─── Step 6a: AI Guardrail ───────────────────────────────────────────────
+    // Defines content safety policies for the restaurant ordering agent.
+    // Filters harmful content, blocks off-topic discussions, masks PII,
+    // and filters profanity. Associated with the AI Agent via orchestrationAiGuardrailId.
+    const aiGuardrail = new wisdom.CfnAIGuardrail(this, 'RestaurantGuardrail', {
+      assistantId: assistantId.valueAsString,
+      name: cdk.Fn.sub('${P}restaurantguardrail', { P: prefix }),
+      description: 'Content safety guardrail for restaurant ordering AI agent',
+      blockedInputMessaging: 'I am sorry, I can only help with restaurant orders. Is there anything else I can get for you?',
+      blockedOutputsMessaging: 'I am sorry, I can only help with restaurant orders. Is there anything else I can get for you?',
+      contentPolicyConfig: {
+        filtersConfig: [
+          { type: 'HATE', inputStrength: 'HIGH', outputStrength: 'HIGH' },
+          { type: 'INSULTS', inputStrength: 'HIGH', outputStrength: 'HIGH' },
+          { type: 'SEXUAL', inputStrength: 'HIGH', outputStrength: 'HIGH' },
+          { type: 'VIOLENCE', inputStrength: 'HIGH', outputStrength: 'HIGH' },
+          { type: 'MISCONDUCT', inputStrength: 'HIGH', outputStrength: 'HIGH' },
+          { type: 'PROMPT_ATTACK', inputStrength: 'MEDIUM', outputStrength: 'NONE' },
+        ],
+      },
+      topicPolicyConfig: {
+        topicsConfig: [
+          {
+            name: 'Political Discussions',
+            definition: 'Discussions about political parties, elections, or politicians.',
+            type: 'DENY',
+            examples: [
+              'What do you think about the election?',
+              'Which political party is better?',
+            ],
+          },
+          {
+            name: 'Financial Investment Advice',
+            definition: 'Advice about stocks, cryptocurrency, or investment strategies.',
+            type: 'DENY',
+            examples: [
+              'Should I invest in stocks?',
+              'What do you think about crypto?',
+            ],
+          },
+        ],
+      },
+      wordPolicyConfig: {
+        managedWordListsConfig: [{ type: 'PROFANITY' }],
+        wordsConfig: [{ text: 'competitor-name-placeholder' }],
+      },
+    });
+    aiGuardrail.node.addDependency(restaurantPromptVersion);
+
+    // Remove stack-level tags from guardrail — the CreateAIGuardrail API
+    // returns "Invalid request body" when tags are passed in the format
+    // CFN sends them. Confirmed via CloudTrail: BadRequestException.
+    cdk.Tags.of(aiGuardrail).remove('auto-delete');
+    cdk.Tags.of(aiGuardrail).remove('Project');
+    cdk.Tags.of(aiGuardrail).remove('ManagedBy');
+
+    // ─── Step 6b: AI Guardrail Version ────────────────────────────────────────
+    const aiGuardrailVersion = new wisdom.CfnAIGuardrailVersion(this, 'RestaurantGuardrailVersion', {
+      aiGuardrailId: aiGuardrail.attrAiGuardrailId,
+      assistantId: assistantId.valueAsString,
+    });
+    aiGuardrailVersion.node.addDependency(aiGuardrail);
+
     // ─── Step 7: Lex V2 Bot ───────────────────────────────────────────────────
-    // voiceSettings.engine = 'generative' enables Nova Sonic S2S.
+    // voiceSettings is intentionally OMITTED — TTS is controlled by the
+    // Set Voice block in the contact flow (connect:agentic engine).
+    // speechRecognitionSettings.speechModelPreference = 'Advanced' enables
+    // Agentic Voice Advanced ASR for improved end-of-turn detection.
     // parentIntentSignature = 'AMAZON.QInConnectIntent' routes to the AI Agent.
     const lexBot = new lex.CfnBot(this, 'OrderingBot', {
       name: cdk.Fn.sub('${P}orderingbot', { P: prefix }),
@@ -384,9 +496,9 @@ export class ConnectAIAgentStack extends cdk.Stack {
         {
           localeId: 'en_US',
           nluConfidenceThreshold: 0.40,
-          voiceSettings: {
-            voiceId: 'Matthew',
-            engine: 'generative',
+          voiceSettings: undefined,
+          speechRecognitionSettings: {
+            speechModelPreference: 'Advanced',
           },
           intents: [
             {
@@ -567,6 +679,7 @@ export class ConnectAIAgentStack extends cdk.Stack {
       configuration: {
         orchestrationAiAgentConfiguration: {
           orchestrationAiPromptId: restaurantPromptVersion.attrAiPromptVersionId,
+          orchestrationAiGuardrailId: aiGuardrailVersion.attrAiGuardrailVersionId,
           connectInstanceArn: connectInstanceArn.valueAsString,
           locale: 'en_US',
           toolConfigurations: [
@@ -655,6 +768,7 @@ export class ConnectAIAgentStack extends cdk.Stack {
       },
     });
     aiAgent.node.addDependency(restaurantPromptVersion);
+    aiAgent.node.addDependency(aiGuardrailVersion);
     aiAgent.node.addDependency(connectMcpAssociation);
     aiAgent.node.addDependency(updateSecurityProfileApps);
     aiAgent.node.addDependency(lexBotAssociation);
@@ -885,6 +999,16 @@ export class ConnectAIAgentStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'AIAgentId', {
       value: aiAgent.attrAiAgentId,
       description: 'ORCHESTRATION AI Agent ID',
+    });
+
+    new cdk.CfnOutput(this, 'AIGuardrailId', {
+      value: aiGuardrail.attrAiGuardrailId,
+      description: 'AI Guardrail ID for content safety policies',
+    });
+
+    new cdk.CfnOutput(this, 'PushSessionDataFnArn', {
+      value: pushSessionDataFn.functionArn,
+      description: 'Lambda ARN for pushing session data — consumed by cn-telephony contact flow',
     });
   }
 }

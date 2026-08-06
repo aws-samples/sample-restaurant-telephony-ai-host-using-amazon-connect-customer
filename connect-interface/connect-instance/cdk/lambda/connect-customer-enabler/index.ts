@@ -53,8 +53,8 @@ export async function handler(event: {
   }
 
   // CREATE or UPDATE: enable Connect Customer and Bot Management.
-  // ENHANCED_CONTACT_MONITORING: enables Q in Connect AI capabilities
-  // BOT_MANAGEMENT: required for Lex generative engine (Nova Sonic S2S)
+  // ENHANCED_CONTACT_MONITORING: enables Connect AI Agents capabilities
+  // BOT_MANAGEMENT: required for Lex bots with Agentic Voice in Connect
   try {
     const describe = await client.send(new DescribeInstanceAttributeCommand({
       InstanceId,
@@ -79,7 +79,7 @@ export async function handler(event: {
     AttributeType: 'BOT_MANAGEMENT' as InstanceAttributeType,
     Value: 'true',
   }));
-  console.log('Bot Management (BOT_MANAGEMENT) enabled — required for Nova Sonic generative engine');
+  console.log('Bot Management (BOT_MANAGEMENT) enabled — required for Lex bots in Connect');
 
   return { PhysicalResourceId: physicalId, Data: { Status: 'enabled', InstanceId } };
 }

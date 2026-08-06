@@ -73,6 +73,11 @@ export class ConnectTelephonyStack extends cdk.Stack {
       description: 'Phone number type. Default: DID',
     });
 
+    const pushSessionDataFnArn = new cdk.CfnParameter(this, 'PushSessionDataFnArn', {
+      type: 'String', minLength: 1,
+      description: 'Lambda ARN for pushing session data (from cn-ai-agent)',
+    });
+
     // ─── Contact Flow ─────────────────────────────────────────────────────────
     // Flow: EnableLogs → SetCallerPhone → CreateWisdomSession → StoreSessionArn
     //       → ConnectParticipantWithLexBot → CheckTool → Disconnect
@@ -103,7 +108,20 @@ export class ConnectTelephonyStack extends cdk.Stack {
             Identifier: 'EnableLogs',
             Type: 'UpdateFlowLoggingBehavior',
             Parameters: { FlowLoggingBehavior: 'Enabled' },
-            Transitions: { NextAction: 'SetCallerPhone', Errors: [], Conditions: [] },
+            Transitions: { NextAction: 'SetVoice', Errors: [], Conditions: [] },
+          },
+          {
+            Identifier: 'SetVoice',
+            Type: 'UpdateContactTextToSpeechVoice',
+            Parameters: {
+              TextToSpeechVoice: 'KATIE',
+              TextToSpeechEngine: 'connect:agentic',
+            },
+            Transitions: {
+              NextAction: 'SetCallerPhone',
+              Errors: [{ ErrorType: 'NoMatchingError', NextAction: 'SetCallerPhone' }],
+              Conditions: [],
+            },
           },
           {
             Identifier: 'SetCallerPhone',
@@ -134,6 +152,20 @@ export class ConnectTelephonyStack extends cdk.Stack {
             Identifier: 'StoreSessionArn',
             Type: 'UpdateContactData',
             Parameters: { WisdomSessionArn: '$.Wisdom.SessionArn' },
+            Transitions: {
+              NextAction: 'PushSessionData',
+              Errors: [{ ErrorType: 'NoMatchingError', NextAction: 'PushSessionData' }],
+              Conditions: [],
+            },
+          },
+          {
+            Identifier: 'PushSessionData',
+            Type: 'InvokeLambdaFunction',
+            Parameters: {
+              LambdaFunctionARN: '${PushSessionDataFnArn}',
+              InvocationTimeLimitSeconds: '8',
+              ResponseValidation: { ResponseType: 'STRING_MAP' },
+            },
             Transitions: {
               NextAction: 'GetInput',
               Errors: [{ ErrorType: 'NoMatchingError', NextAction: 'GetInput' }],
@@ -181,6 +213,7 @@ export class ConnectTelephonyStack extends cdk.Stack {
       {
         LexBotAliasArn: lexBotAliasArn,
         AssistantArn: assistantArn.valueAsString,
+        PushSessionDataFnArn: pushSessionDataFnArn.valueAsString,
       },
     );
 
@@ -188,7 +221,7 @@ export class ConnectTelephonyStack extends cdk.Stack {
       instanceArn: connectInstanceArn.valueAsString,
       name: cdk.Fn.sub('${P}-restaurant-ordering', { P: prefix }),
       type: 'CONTACT_FLOW',
-      description: 'Restaurant AI ordering — routes to Connect AI Agent via Nova Sonic Lex bot',
+      description: 'Restaurant AI ordering - routes to Connect AI Agent via Agentic Voice Lex bot',
       content: contactFlowContent,
     });
 
