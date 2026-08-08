@@ -5,36 +5,34 @@ import { CdkStack } from '../lib/cdk-stack';
 
 /**
  * `${prefix}-AgentCoreGatewayStack` — the `AWS::BedrockAgentCore::Gateway`
- * (MCP + AWS_IAM) fronting the ordering REST API.
+ * (MCP protocol, CUSTOM_JWT inbound auth) fronting the ordering REST API.
  *
- * Ported verbatim from `reference-project/backend/agentcore-gateway/cdk/bin/cdk.ts`.
- * Changes vs reference:
- *   • Reference's context-based `apiGatewayId` read is DELETED — a
- *     `CfnParameter` on the stack itself now carries every upstream identifier
- *     (`DeploymentPrefix`, `ApiGatewayId`, `ApiGatewayUrl`, `ApiGatewayRestApiId`).
- *     The `DeploymentPrefix` flows in via `parameters` (per NFR15, no context
- *     threading).
- *   • `env.region` pinned to `us-east-1` (ground truth §1.3).
- *   • `AwsSolutionsChecks` aspect + stack-level suppressions applied here per
- *     NFR13 / design §11.5b.
+ * Design notes:
+ *   • Every upstream identifier arrives as a `CfnParameter` on the stack
+ *     (`DeploymentPrefix`, `ApiGatewayId`, `ApiGatewayUrl`, `ApiGatewayRestApiId`)
+ *     rather than via `--context`, so each stack deploys in isolation with
+ *     `--parameters Stack:Key=Value`.
+ *   • `env.region` is pinned to `us-east-1`.
+ *   • The `AwsSolutionsChecks` aspect and the stack-level suppressions below are
+ *     applied here; per-construct suppressions live in `lib/cdk-stack.ts`.
  *
  * Stack logical id `AgentCoreGatewayStack`; CloudFormation stack name is set at
  * deploy time by `scripts/deploy-all.sh` via `cdk deploy ${prefix}-AgentCoreGatewayStack`.
  */
 const app = new cdk.App();
 
-// Reaper-opt-out tag: the account-level auto-delete sweeper treats the
+// Reaper-opt-out tag: some account-level auto-delete sweepers treat the
 // absence of this tag as implicit consent to delete. Applied to every
-// CDK app in this workspace — see working-agreements.md.
+// CDK app in this project.
 cdk.Tags.of(app).add('auto-delete', 'no');
 
 const stack = new CdkStack(app, 'AgentCoreGatewayStack', {
   env: { region: 'us-east-1' },
   description:
-    'AgentCore Gateway — MCP server (AWS_IAM authorizer) fronting the ordering REST API',
+    'AgentCore Gateway - MCP server (CUSTOM_JWT authorizer) fronting the ordering REST API',
 });
 
-// Apply cdk-nag AwsSolutions checks per NFR13.
+// Apply cdk-nag AwsSolutions checks.
 cdk.Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));
 
 // ───────────── Stack-level cdk-nag suppressions ─────────────

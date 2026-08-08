@@ -22,7 +22,7 @@
     --phone: #ffffff;
     --sip: #ff9f43;       /* SIP signaling */
     --audio-in: #22d3ee;  /* caller audio (up) */
-    --audio-out: #d946ef; /* Nova Sonic audio (down) */
+    --audio-out: #d946ef; /* Agentic Voice TTS audio (down) */
     --ctrl: #ffffff;      /* WS / auth / handshake */
     --tool: #34d399;      /* MCP + REST tool calls */
     --db: #a78bfa;        /* DynamoDB + Location */
@@ -407,8 +407,8 @@
 const NODES = {
   caller:    { x:  15, y: 340, w: 140, h: 78, label: 'Phone Customer',         sub: 'Inbound call',                         icon: 'phone' },
   connect:   { x: 175, y: 340, w: 140, h: 78, label: 'Amazon Connect',          sub: 'Contact Flow',                         icon: 'chime' },
-  lex:       { x: 335, y: 340, w: 140, h: 78, label: 'Amazon Lex V2',           sub: 'Nova Sonic \u00b7 generative engine',   icon: 'bedrock' },
-  agent:     { x: 495, y: 260, w: 140, h: 78, label: 'Q in Connect AI Agent',   sub: 'ORCHESTRATION \u00b7 Claude Haiku 4.5', icon: 'agentcore' },
+  lex:       { x: 335, y: 340, w: 140, h: 78, label: 'Amazon Lex V2',           sub: 'Agentic Voice \u00b7 Advanced ASR',     icon: 'bedrock' },
+  agent:     { x: 495, y: 260, w: 140, h: 78, label: 'Connect AI Agent',        sub: 'ORCHESTRATION \u00b7 Claude Haiku 4.5', icon: 'agentcore' },
   claude:    { x: 495, y: 420, w: 140, h: 78, label: 'Amazon Bedrock',          sub: 'Claude Haiku 4.5',                     icon: 'bedrock' },
   mcpGw:     { x: 655, y: 340, w: 140, h: 78, label: 'AgentCore Gateway',       sub: 'MCP \u00b7 CUSTOM_JWT',                 icon: 'agentcore' },
   apiGw:     { x: 815, y: 260, w: 140, h: 78, label: 'API Gateway',             sub: 'REST \u00b7 AWS_IAM \u00b7 prod',       icon: 'apigw' },
@@ -421,7 +421,7 @@ const CLUSTERS = [
   { label: 'CALLER',              x:  10, y: 50, w: 150, h: 660, color: '#ff9f43' },
   { label: 'Amazon Connect',      x: 170, y: 50, w: 150, h: 660, color: '#dd344c' },
   { label: 'Amazon Lex V2',       x: 330, y: 50, w: 150, h: 660, color: '#22d3ee' },
-  { label: 'Amazon Q in Connect', x: 490, y: 50, w: 150, h: 660, color: '#d946ef' },
+  { label: 'Connect AI Agents',   x: 490, y: 50, w: 150, h: 660, color: '#d946ef' },
   { label: 'MCP Gateway',         x: 650, y: 50, w: 150, h: 660, color: '#34d399' },
   { label: 'API & Compute',       x: 810, y: 50, w: 150, h: 660, color: '#a78bfa' },
   { label: 'Data Storage',        x: 970, y: 50, w: 200, h: 660, color: '#4d72f3' },
@@ -457,25 +457,25 @@ const STEPS = [
     packets: [{ edge: 'caller-connect', kind: 'sip', count: 2 }],
   },
   {
-    title: 'Contact Flow opens Q in Connect session for the AI Agent',
-    body: 'The <span class="hl">Contact Flow</span> captures the caller ANI, calls <code>CreateWisdomSession</code> to open a session directly with the <span class="hl">Q in Connect AI Agent</span>, stores the session ARN, and plays the greeting: <i>"Thank you for calling, give me a moment to connect."</i>',
-    meta: { Block1: 'UpdateContactAttributes \u2192 callerPhoneNumber', Block2: 'CreateWisdomSession \u2192 Q in Connect AI Agent', Block3: 'UpdateContactData (store session ARN)', Block4: 'ConnectParticipantWithLexBot' },
+    title: 'Contact Flow opens the Amazon Connect AI Agents session',
+    body: 'The <span class="hl">Contact Flow</span> sets the Agentic Voice, captures the caller ANI, calls <code>CreateWisdomSession</code> to open a session with the <span class="hl">Amazon Connect AI Agent</span>, stores the session ARN, invokes a Lambda that pushes the caller phone number into the session via <code>UpdateSessionData</code>, and plays the greeting: <i>"Thank you for calling, give me a moment to connect."</i>',
+    meta: { Block1: 'UpdateContactTextToSpeechVoice \u2192 connect:agentic', Block2: 'UpdateContactAttributes \u2192 callerPhoneNumber', Block3: 'CreateWisdomSession \u2192 Connect AI Agent', Block4: 'InvokeLambdaFunction \u2192 UpdateSessionData (Custom.callerPhoneNumber)', Block5: 'ConnectParticipantWithLexBot' },
     nodes: ['connect', 'agent'],
     edges: [{ edge: 'connect-agent', kind: 'ctrl' }],
     packets: [{ edge: 'connect-agent', kind: 'ctrl', count: 1 }],
   },
   {
     title: 'Contact Flow hands call to Amazon Lex V2',
-    body: 'The Contact Flow connects the caller to the <span class="hl">Amazon Lex V2 bot</span> via the <code>ConnectParticipantWithLexBot</code> block. The Lex bot uses the <span class="hl">Nova Sonic generative engine</span> for real-time speech-to-speech \u2014 no text-to-speech conversion, just pure bidirectional voice streaming.',
-    meta: { Engine: 'generative (Nova Sonic)', Voice: 'Matthew', Intent: 'AMAZON.QInConnectIntent', 'Session TTL': '300s' },
+    body: 'The Contact Flow connects the caller to the <span class="hl">Amazon Lex V2 bot</span> via the <code>ConnectParticipantWithLexBot</code> block. The Lex bot provides the real-time speech layer using <span class="hl">Amazon Connect Agentic Voice</span> \u2014 Advanced ASR listens and detects end-of-turn, and Agentic Voice TTS speaks the reply.',
+    meta: { ASR: 'Agentic Voice (Advanced)', TTS: 'connect:agentic \u00b7 KATIE', Intent: 'AMAZON.QInConnectIntent', 'Session TTL': '300s' },
     nodes: ['connect', 'lex'],
     edges: [{ edge: 'connect-lex', kind: 'audioIn' }],
     packets: [{ edge: 'connect-lex', kind: 'audioIn', count: 2 }],
   },
   {
-    title: 'Lex routes conversation to Q in Connect AI Agent',
-    body: 'The <code>AMAZON.QInConnectIntent</code> routes all conversation turns to the <span class="hl">Q in Connect ORCHESTRATION AI Agent</span>. Lex handles the voice layer; the AI Agent handles all reasoning and tool calls.',
-    meta: { Intent: 'AMAZON.QInConnectIntent', 'Agent type': 'ORCHESTRATION', Protocol: 'Q in Connect API' },
+    title: 'Lex routes conversation to the ORCHESTRATION AI Agent',
+    body: 'The <code>AMAZON.QInConnectIntent</code> routes all conversation turns to the <span class="hl">Amazon Connect ORCHESTRATION AI Agent</span>. Lex with Agentic Voice handles the speech layer; the AI Agent handles all reasoning and tool calls. An <span class="hl">AI Guardrail</span> screens every turn for harmful or off-topic content.',
+    meta: { Intent: 'AMAZON.QInConnectIntent', 'Agent type': 'ORCHESTRATION', Guardrail: 'OrchestrationAIGuardrailId (content filters, denied topics, profanity)' },
     nodes: ['lex', 'agent'],
     edges: [{ edge: 'lex-agent', kind: 'ctrl' }],
     packets: [{ edge: 'lex-agent', kind: 'ctrl', count: 1 }],
@@ -526,7 +526,7 @@ const STEPS = [
   },
   {
     title: 'Order confirmed \u2014 agent fires Complete, call ends',
-    body: 'After the order is placed, the tool result flows back: <span class="hl">Lambda \u2192 API Gateway \u2192 AgentCore Gateway \u2192 Q in Connect AI Agent \u2192 Lex \u2192 Amazon Connect \u2192 Phone Customer</span>. The AI Agent fires the <span class="hl">Complete</span> RETURN_TO_CONTROL tool. Q in Connect sets <code>$.Lex.SessionAttributes.Tool = "Complete"</code>. The Contact Flow disconnects the call.',
+    body: 'After the order is placed, the tool result flows back: <span class="hl">Lambda \u2192 API Gateway \u2192 AgentCore Gateway \u2192 Connect AI Agent \u2192 Lex \u2192 Amazon Connect \u2192 Phone Customer</span>. The AI Agent fires the <span class="hl">Complete</span> RETURN_TO_CONTROL tool, which sets <code>$.Lex.SessionAttributes.Tool = "Complete"</code>. The Contact Flow disconnects the call.',
     meta: { Tool: 'Complete (RETURN_TO_CONTROL)', 'Session attr': '$.Lex.SessionAttributes.Tool = Complete', 'Contact flow block': 'Compare \u2192 DisconnectParticipant', Note: 'Escalate path also disconnects in demo; wire to queue in production' },
     nodes: ['lambdas', 'apiGw', 'mcpGw', 'agent', 'lex', 'connect', 'caller'],
     edges: [

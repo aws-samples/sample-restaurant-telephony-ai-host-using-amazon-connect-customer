@@ -2,33 +2,25 @@
 /**
  * Synthetic Data Population for the Telephony Voice Ordering Agent.
  *
- * Ported + adapted from reference-project/backend/synthetic-data/populate-data.js.
- * Changes from reference:
- *   - Customer identity comes from --user-name + --user-phone (E.164), not
- *     from Cognito deployment outputs. Email is synthesized.
- *   - customerId is derived the same way the live agent derives it:
- *     `pstn-<sha256(e164 + pepper)[:16]>` with pepper read from SSM at
- *     `/${prefix}/customer-id-pepper` (same source the agent container
- *     reads). Guarantees the PK we write matches what the agent will
- *     compute on first inbound call.
- *   - Table names read from cdk-outputs/tel-ddb.json, keyed on the
- *     unprefixed logical stack id `DynamoDBStack`.
- *   - --non-interactive flag skips all interactive prompts so deploy-all.sh
- *     can run this unattended.
+ * Seeds the Locations and Menu tables with realistic data discovered through
+ * the Amazon Location Service Geo Places API. Table names are read from
+ * cdk-outputs/cn-ddb.json, keyed on the logical stack id `DynamoDBStack`.
+ * The --non-interactive flag skips all prompts so deploy-all.sh can run this
+ * unattended.
+ *
+ * Supplying --user-phone additionally seeds a single loyalty Customer row and
+ * some order history. That path is NOT exercised by the default deployment and
+ * currently requires an SSM pepper parameter that no stack in this project
+ * provisions (see lib/customer-id.js).
  *
  * Usage (interactive):
- *   node populate-data.js \
- *     --user-name "Jane Doe" \
- *     --user-phone "+12125550100" \
- *     --company-name "Example Cafe"   # optional rebrand
+ *   node populate-data.js --company-name "Example Cafe"
  *
  * Usage (non-interactive, driven by deploy-all.sh):
  *   node populate-data.js \
- *     --user-name "Jane Doe" \
- *     --user-phone "+12125550100" \
  *     --location "Dallas, TX" \
  *     --business-name "burgers" \
- *     --deployment-prefix qsr-tel \
+ *     --deployment-prefix qsr-cn \
  *     --non-interactive
  */
 const fs = require('fs');

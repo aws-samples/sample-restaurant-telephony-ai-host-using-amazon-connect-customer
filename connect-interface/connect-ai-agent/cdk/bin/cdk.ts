@@ -6,9 +6,11 @@ import { ConnectAIAgentStack } from '../lib/connect-ai-agent-stack';
 /**
  * ${prefix}-ConnectAIAgentStack
  *
- * Native CDK/CloudFormation only — no Lambda custom resources.
- * CfnBot with QInConnectIntent inline, CfnBotVersion, CfnBotAlias,
- * AwsCustomResource for system prompt ID lookup, CfnAIAgent.
+ * Creates the Amazon Lex V2 bot (CfnBot with QInConnectIntent inline,
+ * CfnBotVersion, CfnBotAlias), the AI Guardrail, and the ORCHESTRATION
+ * AI Agent (CfnAIAgent). AwsCustomResource is used only where no L1
+ * construct exists: system prompt ID lookup, MCP app registration, and
+ * activating the agent on the assistant.
  */
 const app = new cdk.App();
 
@@ -21,13 +23,13 @@ const stack = new ConnectAIAgentStack(app, 'ConnectAIAgentStack', {
     account: process.env.CDK_DEFAULT_ACCOUNT,
     region: process.env.CDK_DEFAULT_REGION || 'us-east-1',
   },
-  description: 'Connect AI Agent — Lex bot with QInConnectIntent + SELF_SERVICE AI Agent',
+  description: 'Connect AI Agent - Lex bot with QInConnectIntent, AI Guardrail, and ORCHESTRATION AI Agent',
 });
 
 cdk.Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));
 
 NagSuppressions.addStackSuppressions(stack, [
-  { id: 'AwsSolutions-IAM4', reason: 'AWSLambdaBasicExecutionRole on AwsCustomResource framework Lambda — CDK-managed.' },
+  { id: 'AwsSolutions-IAM4', reason: 'AWSLambdaBasicExecutionRole on the AwsCustomResource framework Lambda. CDK-managed, grants CloudWatch Logs put/create only.' },
   { id: 'AwsSolutions-IAM5', reason: 'wisdom:* and polly:SynthesizeSpeech do not support resource-level IAM. AwsCustomResource policy uses ANY_RESOURCE as required by the SDK call framework.' },
   { id: 'AwsSolutions-L1', reason: 'AwsCustomResource internal Lambda runtime is CDK-managed.' },
 ]);

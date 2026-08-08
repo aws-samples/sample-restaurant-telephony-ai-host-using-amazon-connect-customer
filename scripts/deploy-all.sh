@@ -133,7 +133,7 @@ Prerequisites:
   - Node.js >= 24, npm, AWS CLI v2, git
   - AWS credentials configured (us-east-1 recommended)
   - CDK bootstrapped: npx cdk bootstrap aws://<ACCOUNT>/<REGION>
-  - Amazon Bedrock Nova Sonic model access enabled
+  - Amazon Bedrock Anthropic Claude Haiku 4.5 model access enabled
   - Amazon Connect phone number quota >= 1
 USAGE
       exit 0 ;;
@@ -400,7 +400,7 @@ if [ "$SKIP_SYNTHETIC_DATA" = false ] && should_deploy "cn-synthetic-data"; then
 fi
 
 ################################################################################
-# Layer 5: Connect Instance + Q in Connect Assistant (Section C)
+# Layer 5: Connect Instance + Amazon Connect AI Agents Assistant (Section C)
 ################################################################################
 if should_deploy "cn-instance"; then
   deploy_stack "cn-instance" \
@@ -425,7 +425,7 @@ if should_deploy "cn-gateway"; then
 fi
 
 ################################################################################
-# Layer 7: Connect AI Agent + Lex bot + Nova Sonic (Section C continued)
+# Layer 7: Connect AI Agent + Lex bot + Agentic Voice + AI Guardrail (Section C continued)
 ################################################################################
 if should_deploy "cn-ai-agent"; then
   deploy_stack "cn-ai-agent" \

@@ -2,9 +2,8 @@
 /**
  * Cleanup synthetic data from DynamoDB.
  *
- * Ported from reference-project/backend/synthetic-data/cleanup-data.js.
- * Only change: table names come from cdk-outputs/cn-ddb.json keyed on
- * "DynamoDBStack" (vs the reference's "QSR-DynamoDBStack").
+ * Table names come from cdk-outputs/cn-ddb.json, keyed on the logical stack id
+ * "DynamoDBStack".
  *
  * Usage:
  *   node cleanup-data.js              # interactive confirm

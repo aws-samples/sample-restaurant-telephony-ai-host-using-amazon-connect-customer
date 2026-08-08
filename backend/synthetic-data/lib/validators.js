@@ -1,10 +1,8 @@
 /**
  * Input validation for the telephony synthetic-data tool.
  *
- * Adapted from reference-project/backend/synthetic-data/lib/validators.js.
- * Changes:
- *   - Adds validateE164Phone for --user-phone input.
- *   - Adds slugifyName for deterministic generated email (<slug>@example.com).
+ * Includes validateE164Phone for the optional --user-phone input and
+ * slugifyName for the deterministic generated email (<slug>@example.com).
  */
 
 /**

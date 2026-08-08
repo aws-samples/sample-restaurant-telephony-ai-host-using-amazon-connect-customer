@@ -47,7 +47,7 @@ export class ConnectTelephonyStack extends cdk.Stack {
 
     const assistantArn = new cdk.CfnParameter(this, 'AssistantArn', {
       type: 'String', minLength: 1,
-      description: 'Q in Connect assistant ARN from cn-instance (required for CreateWisdomSession)',
+      description: 'Amazon Connect AI Agents assistant ARN from cn-instance (required for CreateWisdomSession)',
     });
 
     const lexBotId = new cdk.CfnParameter(this, 'LexBotId', {

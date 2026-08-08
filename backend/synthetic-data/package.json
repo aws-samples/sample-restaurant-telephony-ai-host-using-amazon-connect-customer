@@ -2,7 +2,7 @@
   "name": "telephony-synthetic-data",
   "version": "1.0.0",
   "private": true,
-  "description": "Synthetic data population for the Telephony Voice Ordering Agent. Ported + adapted from reference-project/backend/synthetic-data/.",
+  "description": "Seeds menu and location data into the DynamoDB tables for the telephony voice ordering solution.",
   "main": "populate-data.js",
   "scripts": {
     "populate": "node populate-data.js",

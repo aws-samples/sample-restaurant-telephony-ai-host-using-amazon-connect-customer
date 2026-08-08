@@ -1,9 +1,8 @@
 /**
  * AWS Geo Places API integration for location discovery.
  *
- * Verbatim port from reference-project/backend/synthetic-data/lib/geo-places.js.
- * No changes needed — the telephony path uses Geo Places identically to the
- * reference (address/coords in, nearby places out).
+ * Takes an address or coordinates in, returns nearby places out. Used at seed
+ * time to populate the Locations table with real businesses.
  */
 const { GeoPlacesClient, SearchTextCommand } = require('@aws-sdk/client-geo-places');
 

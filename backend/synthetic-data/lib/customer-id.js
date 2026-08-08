@@ -1,20 +1,18 @@
 /**
- * Derive the deterministic telephony customer_id from an E.164 phone number.
+ * Derive a pseudonymous customer id from an E.164 phone number:
  *
- * Mirrors backend/agentcore-runtime-telephony/agent/pstn_customer.py:
+ *   customerId = "pstn-" + sha256(e164 + pepper).hexdigest()[:16]
  *
- *   customer_id = "pstn-" + sha256(e164 + pepper).hexdigest()[:16]
+ * The pepper is read from an SSM SecureString at
+ * `/${prefix}/customer-id-pepper`.
  *
- * The pepper is read from the same SSM SecureString parameter the agent
- * reads at call time: `/${prefix}/customer-id-pepper`. That parameter is
- * provisioned by `${prefix}-AgentRuntimeStack` (see
- * backend/agentcore-runtime-telephony/cdk/runtime/lib/runtime-stack.ts).
- *
- * Using the same pepper here guarantees that the Customers row this
- * script writes (PK = `CUSTOMER#<customer_id>`) will be the row the
- * agent reads on the first inbound call from that phone number — so the
- * prompt-renderer Lambda finds the loyalty record and the caller is
- * greeted by name.
+ * NOTE: this module is used ONLY by the optional loyalty-seeding path in
+ * populate-data.js, which runs when `--user-phone` is supplied. The default
+ * deployment does not use it, and no stack in this project provisions the
+ * pepper parameter. The deployed AI Agent derives its own customer id
+ * directly from the caller's digits (see the system prompt in
+ * connect-interface/connect-ai-agent), so the two schemes do not match.
+ * Reconcile them before relying on the loyalty path.
  */
 const crypto = require('crypto');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');

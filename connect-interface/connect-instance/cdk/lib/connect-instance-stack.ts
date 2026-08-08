@@ -13,7 +13,7 @@ import * as path from 'path';
 /**
  * ConnectInstanceStack
  *
- * Creates the Connect instance and Q in Connect assistant.
+ * Creates the Connect instance and the Amazon Connect AI Agents assistant.
  * HoursOfOperation and Queue are NOT created here — not needed for demo.
  *
  * CfnOutputs:
@@ -157,7 +157,7 @@ export class ConnectInstanceStack extends cdk.Stack {
     });
     connectCustomerEnabler.node.addDependency(instance);
 
-    // ─── Q in Connect Assistant ───────────────────────────────────────────────
+    // ─── Amazon Connect AI Agents Assistant ──────────────────────────────────
     const assistant = new wisdom.CfnAssistant(this, 'QConnectAssistant', {
       name: cdk.Fn.sub('${P}-assistant', { P: prefix }),
       type: 'AGENT',
@@ -165,7 +165,7 @@ export class ConnectInstanceStack extends cdk.Stack {
     });
     assistant.node.addDependency(connectCustomerEnabler);
 
-    // ─── IntegrationAssociation: Connect instance ↔ Q in Connect Assistant ───
+    // ─── IntegrationAssociation: Connect instance ↔ AI Agents Assistant ──────
     const assistantAssociation = new connect.CfnIntegrationAssociation(this, 'AssistantAssociation', {
       instanceId: instance.attrArn,
       integrationType: 'WISDOM_ASSISTANT',
@@ -187,12 +187,12 @@ export class ConnectInstanceStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, 'AssistantId', {
       value: assistant.attrAssistantId,
-      description: 'Q in Connect Assistant UUID',
+      description: 'Amazon Connect AI Agents Assistant UUID',
     });
 
     new cdk.CfnOutput(this, 'AssistantArn', {
       value: assistant.attrAssistantArn,
-      description: 'Q in Connect Assistant ARN',
+      description: 'Amazon Connect AI Agents Assistant ARN',
     });
   }
 }

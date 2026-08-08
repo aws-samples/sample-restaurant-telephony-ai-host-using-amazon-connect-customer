@@ -5,16 +5,16 @@ import { Construct } from 'constructs';
 /**
  * {prefix}-DynamoDBStack — Customers / Orders / Menu / Carts / Locations.
  *
- * Ported from reference-project/backend/backend-infrastructure/lib/dynamodb-stack.ts
- * (see NOTICE.md). Changes:
- *   • `DeploymentPrefix` CfnParameter declared locally (R19 / task 1.2) so the
- *     same regex is duplicated across every stack on purpose (isolation beats DRY).
- *   • Every `tableName` literal (`QSR-Customers`, …) becomes
- *     `cdk.Fn.sub('${P}-Customers', …)` so a single deploy-time value drives
- *     the name.
- *   • Every `CfnOutput` has NO `exportName` (P5). Logical IDs are kept verbatim
- *     (`MenuTableName`, `CartsTableName`, …) so the cdk-outputs JSON shape
- *     read by scripts/deploy-all.sh stays stable.
+ * Design notes:
+ *   • `DeploymentPrefix` CfnParameter is declared locally. The same regex is
+ *     duplicated in every stack on purpose: isolation beats DRY here, because
+ *     each stack must be deployable on its own.
+ *   • Every `tableName` is parameterized as `cdk.Fn.sub('${P}-Customers', …)`
+ *     so a single deploy-time value drives the name.
+ *   • Every `CfnOutput` has NO `exportName`, so stacks stay independently
+ *     deployable. Logical IDs are kept stable (`MenuTableName`,
+ *     `CartsTableName`, …) because scripts/deploy-all.sh reads them from the
+ *     cdk-outputs JSON.
  *   • `this.tables` stays exposed for within-app use (addDependency), but
  *     downstream stacks (LambdaStack, ApiGatewayStack) MUST NOT reach into it
  *     for grants — they take table NAMES via their own CfnParameters.

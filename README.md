@@ -203,7 +203,7 @@ const aiGuardrail = new wisdom.CfnAIGuardrail(this, 'RestaurantGuardrail', {
   contentPolicyConfig: {
     filtersConfig: [
       { type: 'HATE', inputStrength: 'HIGH', outputStrength: 'HIGH' },
-      { type: 'PROMPT_ATTACK', inputStrength: 'HIGH', outputStrength: 'NONE' },
+      { type: 'PROMPT_ATTACK', inputStrength: 'MEDIUM', outputStrength: 'NONE' },
       // ...
     ],
   },
@@ -331,8 +331,7 @@ Your restaurant AI host is live at +1XXXXXXXXXX - dial to test.
 | `--skip-preflight` | - | Skip Node.js / AWS CLI checks. |
 | `--only <component>` | - | Deploy one component. Valid: `cn-ddb`, `cn-location`, `cn-lambdas`, `cn-apigw`, `cn-instance`, `cn-gateway`, `cn-ai-agent`, `cn-telephony`, `cn-synthetic-data`. |
 | `--company-name "<brand>"` | `Amazing Burgers` | Brand name used in the AI agent system prompt greeting and in seeded location data. |
-| `--user-name "<name>"` | `Jane Doe` | Display name for the synthetic loyalty customer. |
-| `--user-phone <E.164>` | (none) | Phone number for the loyalty customer - the number you dial from. If omitted, only menu and location data is seeded. |
+| `--user-name "<name>"` | `Jane Doe` | Reserved for the synthetic loyalty customer. Not used by the default deployment - see the note below. |
 | `--synth-location "<where>"` | `Dallas, Texas` | Search anchor for Amazon Location Service geo-place queries when seeding locations. |
 | `--synth-business-name "<query>"` | `Burger Restaurants` | Search term for Amazon Location Service geo-places. Determines what real-world locations populate the Locations table. |
 | `--skip-synthetic-data` | - | Skip DynamoDB seeding entirely. |
@@ -342,13 +341,15 @@ Your restaurant AI host is live at +1XXXXXXXXXX - dial to test.
 
 **Demo rebrand tip:** Use `--company-name` to control what brand the agent announces and `--synth-business-name` to control what real-world locations are pulled into the Locations table. For example, `--synth-business-name "Burger Restaurants" --company-name "My Restaurant"` searches for burger restaurants near `--synth-location` and brands them as "My Restaurant".
 
+**Note on loyalty seeding:** the default deployment seeds menu and location data only. No customer profile is created, and the AI Agent identifies each caller solely by the phone number pushed into its session, which is what gives every caller an isolated cart and stamps each order with the number it came from. `GetCustomerProfile` and `GetPreviousOrders` are exposed to the agent as MCP tools but the system prompt does not call them, so greeting a returning caller by name is an extension point rather than shipped behavior. `--user-name` is carried through to the seeder but only takes effect on the loyalty path, which the default deployment does not exercise.
+
 ### What the script deploys
 
 1. **DynamoDBStack** - five DynamoDB tables
 2. **LocationStack** - Amazon Location Service place index and route calculator
 3. **LambdaStack** - ten Node.js 24.x Lambda ordering functions
 4. **ApiGatewayStack** - REST API (`prod` stage, AWS_IAM)
-5. Synthetic data - menu items, restaurant locations, optional loyalty customer
+5. Synthetic data - menu items and restaurant locations
 6. **ConnectInstanceStack** - Connect instance, Amazon Connect AI Agents assistant
 7. **AgentCoreGatewayStack** - AgentCore Gateway with MCP + CUSTOM_JWT
 8. **ConnectAIAgentStack** - Lex bot, AI Guardrail, ORCHESTRATION AI Agent, security profile
@@ -495,7 +496,10 @@ Verify in the [AWS CloudFormation console](https://console.aws.amazon.com/cloudf
 A: The agent must resolve a location before calling `GetMenu`. The system prompt enforces this: the agent asks for a city or zip code, calls `GeocodeAddress`, then `GetNearestLocations` to get a `locationId`, and only then calls `GetMenu`. If the agent skips this sequence and calls `GetMenu` without a `locationId`, the Lambda returns a 400 error and the agent retries.
 
 **Q: Why does the customer ID show as `anon-XXXXXXXX` instead of the phone number?**
-A: The caller ANI is captured in `$.contactAttributes.callerPhoneNumber` by the contact flow. The ORCHESTRATION AI Agent reads this from the prompt context. The fallback to `anon-` is intentional for callers with no ANI (e.g. calling from a simulator or a number that blocks caller ID). Order isolation is guaranteed in both cases - each caller has a unique cart partition key in DynamoDB.
+A: The contact flow captures the caller ANI, then the Push Session Data Lambda calls `UpdateSessionData` to write it into the AI Agent session as `Custom.callerPhoneNumber`. The system prompt reads it as `{{$.Custom.callerPhoneNumber}}`. Contact attributes are not visible to an AI prompt, so this Lambda hop is required. The fallback to `anon-` is intentional for callers with no ANI (e.g. calling from a simulator or a number that blocks caller ID). Order isolation is guaranteed in both cases - each caller has a unique cart partition key in DynamoDB.
+
+**Q: The deploy fails with `Each variable may only appear once.`**
+A: The `AWS::Wisdom::AIPrompt` API rejects a prompt template that references the same variable more than once. If you edit the system prompt, `{{$.Custom.callerPhoneNumber}}` (and any other `{{$....}}` variable) must appear exactly once in the template.
 
 **Q: The ConnectAIAgentStack deploy fails or MCP tools show "Insufficient" permissions.**
 A: The security profile must be correctly associated to the AI Agent after the agent version is published. The stack handles this automatically. If you manually update the agent outside CDK, redeploy the `cn-ai-agent` stack to restore the security profile association.
@@ -508,6 +512,10 @@ A: These warnings appear when Lambda functions imported via `fromFunctionArn` us
 
 **Q: The `ConnectTelephonyStack` deploy fails with "Phone number not available."**
 A: This can happen when a previously released phone number hasn't cleared the pool yet. Retry the deploy - CloudFormation will claim a different available number. This is a rare timing issue that only occurs when you release and immediately re-claim in the same Region.
+
+**Q: The deploy succeeds but calls to the number connect to silence.**
+
+A: The claimed number is not routable, even though Amazon Connect reports it as `CLAIMED`. Calls connect somewhere upstream in the carrier network and never reach Amazon Connect, so there is no ring and no greeting. You can confirm it by placing a call and checking that there is no contact trace record, no contact flow log, and no `ConcurrentCalls` metric on the instance while you are still connected. If all three are empty, the contact flow, the Lex bot, and the AI Agent never ran and none of them are worth debugging. Claim a different number, point it at the same contact flow, and dial again. This is most likely right after a cleanup followed by a fresh deploy, because the new number is drawn from the same pool the previous one was just returned to.
 
 **Q: Can multiple callers order simultaneously?**
 A: Yes. Each caller gets a unique `customerId` and therefore a unique DynamoDB partition key (`CUSTOMER#{customerId}`). Cart and order data are fully isolated per caller.

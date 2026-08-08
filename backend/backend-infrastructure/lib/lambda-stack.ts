@@ -10,20 +10,19 @@ import { NagSuppressions } from 'cdk-nag';
 /**
  * {prefix}-LambdaStack — the ten ordering Lambdas.
  *
- * Ported from reference-project/backend/backend-infrastructure/lib/lambda-stack.ts.
- * Changes vs reference:
- *   • `DeploymentPrefix` CfnParameter declared locally (R19).
+ * Design notes:
+ *   • `DeploymentPrefix` CfnParameter is declared locally.
  *   • Seven additional CfnParameters accept upstream identifiers as strings
- *     (table names + place-index name + route-calculator name). Values flow in
- *     at deploy time from `cdk-outputs/tel-ddb.json` + `cdk-outputs/tel-location.json`.
+ *     (table names, place-index name, route-calculator name). Values flow in
+ *     at deploy time from `cdk-outputs/cn-ddb.json` and `cdk-outputs/cn-location.json`.
  *   • Each DDB table is re-materialized inside this stack via `Table.fromTableName`
  *     so the CDK `grantReadData` / `grantReadWriteData` affordances still work,
- *     but the stack does NOT depend on construct references from DynamoDBStack.
- *   • Each Lambda `functionName` is parameterized via `cdk.Fn.sub('${P}-<Name>', …)`.
- *   • Each Lambda exec-role `roleName` is parameterized the same way.
- *   • Every Lambda runtime pinned to `lambda.Runtime.NODEJS_24_X` (inherited).
- *   • CfnOutput `exportName` clauses stripped (P5).
- *   • `this.functions` still exposed for within-app `addDependency`.
+ *     without depending on construct references from DynamoDBStack.
+ *   • Each Lambda `functionName` and exec-role `roleName` is parameterized via
+ *     `cdk.Fn.sub('${P}-<Name>', …)`.
+ *   • Every Lambda runtime is pinned to `lambda.Runtime.NODEJS_24_X`.
+ *   • CfnOutputs carry no `exportName`, so stacks stay independently deployable.
+ *   • `this.functions` is exposed for within-app `addDependency` only.
  */
 export class LambdaStack extends cdk.Stack {
   public readonly functions: {
@@ -54,17 +53,17 @@ export class LambdaStack extends cdk.Stack {
     const menuTableNameParam = new cdk.CfnParameter(this, 'MenuTableName', {
       type: 'String',
       minLength: 1,
-      description: 'Menu table name (from cdk-outputs/tel-ddb.json)',
+      description: 'Menu table name (from cdk-outputs/cn-ddb.json)',
     });
     const cartsTableNameParam = new cdk.CfnParameter(this, 'CartsTableName', {
       type: 'String',
       minLength: 1,
-      description: 'Carts table name (from cdk-outputs/tel-ddb.json)',
+      description: 'Carts table name (from cdk-outputs/cn-ddb.json)',
     });
     const ordersTableNameParam = new cdk.CfnParameter(this, 'OrdersTableName', {
       type: 'String',
       minLength: 1,
-      description: 'Orders table name (from cdk-outputs/tel-ddb.json)',
+      description: 'Orders table name (from cdk-outputs/cn-ddb.json)',
     });
     const customersTableNameParam = new cdk.CfnParameter(
       this,
@@ -72,7 +71,7 @@ export class LambdaStack extends cdk.Stack {
       {
         type: 'String',
         minLength: 1,
-        description: 'Customers table name (from cdk-outputs/tel-ddb.json)',
+        description: 'Customers table name (from cdk-outputs/cn-ddb.json)',
       },
     );
     const locationsTableNameParam = new cdk.CfnParameter(
@@ -81,13 +80,13 @@ export class LambdaStack extends cdk.Stack {
       {
         type: 'String',
         minLength: 1,
-        description: 'Locations table name (from cdk-outputs/tel-ddb.json)',
+        description: 'Locations table name (from cdk-outputs/cn-ddb.json)',
       },
     );
     const placeIndexNameParam = new cdk.CfnParameter(this, 'PlaceIndexName', {
       type: 'String',
       minLength: 1,
-      description: 'Location Service place-index name (from cdk-outputs/tel-location.json)',
+      description: 'Location Service place-index name (from cdk-outputs/cn-location.json)',
     });
     const routeCalculatorNameParam = new cdk.CfnParameter(
       this,
@@ -96,7 +95,7 @@ export class LambdaStack extends cdk.Stack {
         type: 'String',
         minLength: 1,
         description:
-          'Location Service route-calculator name (from cdk-outputs/tel-location.json)',
+          'Location Service route-calculator name (from cdk-outputs/cn-location.json)',
       },
     );
 
@@ -487,12 +486,12 @@ export class LambdaStack extends cdk.Stack {
           {
             id: 'AwsSolutions-IAM4',
             reason:
-              "Lambda basic execution role is AWS-managed; grants CloudWatch Logs put/create only. Each Lambda's data-layer access is scoped via explicit DDB/Location grants ported from reference-project.",
+              "Lambda basic execution role is AWS-managed and grants CloudWatch Logs put/create only. Each Lambda's data-layer access is scoped separately via explicit DynamoDB and Location Service grants.",
           },
           {
             id: 'AwsSolutions-IAM5',
             reason:
-              'Wildcards are scoped to specific ARNs interpolated from DeploymentPrefix CfnParameter (DDB table ARNs, Location place-index/route-calculator ARNs). Action-level scope (geo:SearchPlaceIndexForPosition, dynamodb:BatchGetItem, etc.) follows the reference-project grants verbatim.',
+              'Wildcards are scoped to specific ARNs interpolated from the DeploymentPrefix CfnParameter (DynamoDB table ARNs, Location place-index and route-calculator ARNs). Actions are scoped per function, for example geo:SearchPlaceIndexForPosition and dynamodb:BatchGetItem.',
           },
           {
             id: 'AwsSolutions-L1',

@@ -7,7 +7,7 @@ import { ConnectInstanceStack } from '../lib/connect-instance-stack';
  * ${prefix}-ConnectInstanceStack
  *
  * Deploys a fresh Amazon Connect instance with Connect Customer (AI capabilities)
- * enabled, plus the Q in Connect Assistant required for AI Agents.
+ * enabled, plus the Amazon Connect AI Agents assistant that the AI Agent needs.
  *
  * Stack outputs flow to cn-ai-agent and cn-telephony via cdk-outputs/cn-instance.json.
  */
@@ -23,7 +23,7 @@ const stack = new ConnectInstanceStack(app, 'ConnectInstanceStack', {
     region: process.env.CDK_DEFAULT_REGION || 'us-east-1',
   },
   description:
-    'Amazon Connect instance with Connect Customer AI capabilities and Q in Connect Assistant',
+    'Amazon Connect instance with Connect Customer AI capabilities and the Amazon Connect AI Agents assistant',
 });
 
 cdk.Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));
@@ -37,7 +37,7 @@ NagSuppressions.addStackSuppressions(stack, [
   {
     id: 'AwsSolutions-IAM5',
     reason:
-      'Custom-resource Lambdas need connect:* and wisdom:* to manage Connect Customer enablement and Q in Connect Assistant lifecycle. These APIs do not support resource-level IAM. Scoped to account + region via execution role.',
+      'Custom-resource Lambdas need connect:* and wisdom:* to manage Connect Customer enablement and the Amazon Connect AI Agents assistant lifecycle. These APIs do not support resource-level IAM. Scoped to account and region via the execution role.',
   },
   {
     id: 'AwsSolutions-L1',

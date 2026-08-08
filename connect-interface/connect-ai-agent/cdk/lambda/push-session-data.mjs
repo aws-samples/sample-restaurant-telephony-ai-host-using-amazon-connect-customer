@@ -3,11 +3,11 @@
  *
  * Invoked from the contact flow AFTER CreateWisdomSession.
  * Reads the caller's phone number from the contact event and pushes it
- * into the Q in Connect session via UpdateSessionData so the AI Agent
+ * into the AI Agents session via UpdateSessionData so the AI Agent
  * prompt can reference it as {{$.Custom.callerPhoneNumber}}.
  *
  * Environment variables:
- *   ASSISTANT_ID — Q in Connect assistant UUID
+ *   ASSISTANT_ID — Amazon Connect AI Agents assistant UUID
  */
 
 import { QConnectClient, UpdateSessionDataCommand } from '@aws-sdk/client-qconnect';

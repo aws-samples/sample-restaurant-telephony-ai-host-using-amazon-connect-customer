@@ -9,11 +9,11 @@ import { ApiGatewayStack } from '../lib/api-gateway-stack';
 
 /**
  * Single CDK app, four independent stacks. Deployed per-stack via
- * `cdk deploy <StackId>` from scripts/deploy-all.sh (Task 9.1). Each
- * stack takes every cross-stack value through its own `CfnParameter`s —
- * no shared construct references (the reference-project app used
- * `lambdaStack = new LambdaStack(app, ..., { tables: dynamoDBStack.tables })`;
- * that pattern is dropped here per R4).
+ * `cdk deploy <StackId>` from scripts/deploy-all.sh. Each stack takes every
+ * cross-stack value through its own `CfnParameter`s. There are deliberately
+ * no shared construct references between stacks (no
+ * `new LambdaStack(app, ..., { tables: dynamoDBStack.tables })`), so any one
+ * stack can be deployed or redeployed on its own.
  *
  * Stack IDs are un-prefixed here (the construct id is the template's
  * logical id). The CloudFormation stack name at deploy time is prefixed
@@ -65,13 +65,11 @@ lambdaStack.addDependency(dynamoDBStack);
 lambdaStack.addDependency(locationStack);
 apiGatewayStack.addDependency(lambdaStack);
 
-// Global tags. Intentionally free of the legacy `QSR-Ordering` project name
-// (the task gate `grep -c 'QSR-' cdk.out/*.template.json` must be 0).
+// Global tags.
 cdk.Tags.of(app).add('Project', 'telephony-voice-ordering-agent');
 cdk.Tags.of(app).add('ManagedBy', 'CDK');
-// Reaper-opt-out tag: the account-level auto-delete sweeper treats the
-// absence of this tag as implicit consent to delete. DynamoDB tables were
-// reaped on 2026-05-11 because of this — see working-agreements.md.
+// Reaper-opt-out tag: some account-level auto-delete sweepers treat the
+// absence of this tag as implicit consent to delete.
 cdk.Tags.of(app).add('auto-delete', 'no');
 
 // cdk-nag aspect (AwsSolutions-*). Per-stack + per-resource suppressions
@@ -89,17 +87,17 @@ for (const stack of [
     {
       id: 'AwsSolutions-IAM4',
       reason:
-        "AWSLambdaBasicExecutionRole is an AWS-managed policy that grants CloudWatch Logs put/create only. Each Lambda's data-layer access is scoped via explicit DDB/Location grants ported from reference-project.",
+        "AWSLambdaBasicExecutionRole is an AWS-managed policy that grants CloudWatch Logs put/create only. Each Lambda's data-layer access is scoped separately via explicit DynamoDB and Location Service grants.",
     },
     {
       id: 'AwsSolutions-IAM5',
       reason:
-        'Wildcards are scoped to specific ARNs interpolated from the DeploymentPrefix CfnParameter (DDB table ARNs, Location place-index/route-calculator ARNs). Action-level scope (geo:SearchPlaceIndexForPosition, dynamodb:BatchGetItem, etc.) follows reference-project grants verbatim.',
+        'Wildcards are scoped to specific ARNs interpolated from the DeploymentPrefix CfnParameter (DynamoDB table ARNs, Location place-index and route-calculator ARNs). Actions are scoped per function, for example geo:SearchPlaceIndexForPosition and dynamodb:BatchGetItem.',
     },
     {
       id: 'AwsSolutions-APIG2',
       reason:
-        "Each Lambda handler performs its own body validation (place-order validates customerId + locationId + R9 baseline fields; add-to-cart validates items array; etc.). API Gateway's models already cover the add-to-cart / place-order body shapes — additional request-validator enforcement is redundant for MVP scope.",
+        "Each Lambda handler performs its own body validation: place-order validates customerId and locationId plus the order body fields, add-to-cart validates the items array, and so on. API Gateway models already cover the add-to-cart and place-order body shapes, so an additional request validator would be redundant in this sample.",
     },
   ]);
 }

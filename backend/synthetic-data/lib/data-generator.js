@@ -1,16 +1,11 @@
 /**
  * Synthetic data generation for DynamoDB tables.
  *
- * Adapted from reference-project/backend/synthetic-data/lib/data-generator.js.
- * Changes vs the reference:
- *   - generateCustomerData signature takes phoneNumber + email (reference
- *     took email as the identity anchor). phoneNumber is the E.164 string
- *     that `pstn_customer.derive` hashes at call time, stored as a top-level
- *     attribute so the prompt-renderer Lambda can surface it to logs.
- *     `customerId` is the pre-computed `pstn-<sha256(e164+pepper)[:16]>`
- *     (computed by populate-data.js before calling in here).
- *   - Other generators (locations, menu, orders) are unchanged — the
- *     backend Lambdas consume the same PK/SK shape in both projects.
+ * Generates the Locations and Menu rows that the default deployment seeds, plus
+ * the Customer and Order rows used only by the optional loyalty path in
+ * populate-data.js. `generateCustomerData` takes a pre-computed `customerId`
+ * along with the E.164 phone number and a synthetic email; the caller computes
+ * the id before calling in here.
  *
  * Note: Math.random() is used for test data generation, not cryptography.
  */

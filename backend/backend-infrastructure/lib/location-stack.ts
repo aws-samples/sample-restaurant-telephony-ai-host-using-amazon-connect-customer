@@ -5,13 +5,14 @@ import { Construct } from 'constructs';
 /**
  * {prefix}-LocationStack — place-index + route-calculator.
  *
- * Ported from reference-project/backend/backend-infrastructure/lib/location-stack.ts.
- * Changes vs reference:
- *   • `DeploymentPrefix` CfnParameter declared locally (R19).
- *   • `indexName: 'QSRRestaurantIndex'` → `cdk.Fn.sub('${P}-RestaurantIndex', …)`.
- *   • `calculatorName: 'QSRRouteCalculator'` → `cdk.Fn.sub('${P}-RouteCalculator', …)`.
- *   • `CfnMap` dropped entirely — frontend-only (design §8 non-goal #7).
- *   • CfnOutput `exportName` clauses stripped (P5).
+ * Design notes:
+ *   • `DeploymentPrefix` CfnParameter is declared locally so the stack deploys
+ *     in isolation.
+ *   • Resource names are parameterized: `cdk.Fn.sub('${P}-RestaurantIndex', …)`
+ *     and `cdk.Fn.sub('${P}-RouteCalculator', …)`.
+ *   • No `CfnMap` is created. Map tiles are only needed by a browser frontend,
+ *     and this solution is telephony-only.
+ *   • CfnOutputs carry no `exportName`, so stacks stay independently deployable.
  */
 export class LocationStack extends cdk.Stack {
   public readonly placeIndex: location.CfnPlaceIndex;

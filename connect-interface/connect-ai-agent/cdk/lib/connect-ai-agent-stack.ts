@@ -32,7 +32,7 @@ import { Construct } from 'constructs';
  *  Step 14d: AssociateSpV1           — Connect.associateSecurityProfiles :1
  *  Step 15: ActivateOrchestrationAgent — QConnect.updateAssistantAIAgent (Connect.SelfService)
  *
- * The integration (steps 1-2) is created FIRST so Q in Connect can resolve
+ * The integration (steps 1-2) is created FIRST so the AI Agents service can resolve
  * the MCP tool namespace when the AI Agent is created (step 13).
  *
  * All AwsCustomResource instances share ONE IAM role (CustomResourceRole — step 3).
@@ -63,12 +63,12 @@ export class ConnectAIAgentStack extends cdk.Stack {
 
     const assistantId = new cdk.CfnParameter(this, 'AssistantId', {
       type: 'String', minLength: 1,
-      description: 'Q in Connect assistant UUID from cn-instance',
+      description: 'Amazon Connect AI Agents assistant UUID from cn-instance',
     });
 
     const assistantArn = new cdk.CfnParameter(this, 'AssistantArn', {
       type: 'String', minLength: 1,
-      description: 'Q in Connect assistant ARN from cn-instance',
+      description: 'Amazon Connect AI Agents assistant ARN from cn-instance',
     });
 
     const companyName = new cdk.CfnParameter(this, 'CompanyName', {
@@ -173,7 +173,7 @@ export class ConnectAIAgentStack extends cdk.Stack {
 
     // ─── Step 1: AppIntegrations — Register gateway as MCP server ────────────
     // MUST be first — the integration namespace must be live before AI Agent
-    // is created so Q in Connect can resolve tool calls at runtime.
+    // is created so the AI Agents service can resolve tool calls at runtime.
     const mcpAppRegistration = new cr.AwsCustomResource(this, 'McpAppRegistration', {
       role: customResourceRole,
       onCreate: {

@@ -1,4 +1,4 @@
-// Unit tests for Task 2.5 — R9 baseline body shape on PlaceOrder Lambda.
+// Unit tests for the PlaceOrder Lambda request body validation.
 //
 // We use Node's built-in `node:test` runner + `assert`, and inject a hand-rolled
 // DynamoDB Document Client stub via `setDocClient()` (exported from the handler

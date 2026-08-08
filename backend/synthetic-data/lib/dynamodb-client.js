@@ -1,7 +1,7 @@
 /**
  * DynamoDB client for data ingestion.
  *
- * Verbatim port from reference-project/backend/synthetic-data/lib/dynamodb-client.js.
+ * Batch-writes seed rows into the ordering tables.
  * Telephony feature writes to the same PK/SK shape (Customers: PK=CUSTOMER#<id> SK=PROFILE;
  * Locations: PK=LOCATION#<id>; Menu: PK=LOCATION#<id>#ITEM#<id>; Orders: PK=CUSTOMER#<id>
  * SK=ORDER#<orderId>#<ts>).

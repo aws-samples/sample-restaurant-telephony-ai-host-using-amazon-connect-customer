@@ -168,5 +168,5 @@ exports.handler = async (event) => {
   }
 };
 
-// Exported for unit tests (Task 2.5 / R9 validation coverage).
+// Exported so unit tests can inject a stub DynamoDB document client.
 exports.setDocClient = setDocClient;

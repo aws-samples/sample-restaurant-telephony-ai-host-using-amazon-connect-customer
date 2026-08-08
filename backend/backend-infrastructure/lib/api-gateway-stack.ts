@@ -8,16 +8,15 @@ import { NagSuppressions } from 'cdk-nag';
 /**
  * {prefix}-ApiGatewayStack — the REST API.
  *
- * Ported from reference-project/backend/backend-infrastructure/lib/api-gateway-stack.ts.
- * Changes vs reference:
- *   • `DeploymentPrefix` + ten `*LambdaArn` CfnParameters declared locally.
- *     The ten Lambda ARNs flow in from `cdk-outputs/tel-lambdas.json` at deploy
- *     time; the stack resolves each via `lambda.Function.fromFunctionArn`.
- *   • No more `userPool` / `CognitoUserPoolsAuthorizer` wiring (design §8 non-goal #8).
- *     Every method keeps `AuthorizationType.IAM` (which the reference already uses).
- *   • `restApiName` parameterized via `cdk.Fn.sub('${P}-Ordering-API', …)`.
+ * Design notes:
+ *   • `DeploymentPrefix` and ten `*LambdaArn` CfnParameters are declared locally.
+ *     The ten Lambda ARNs flow in from `cdk-outputs/cn-lambdas.json` at deploy
+ *     time; the stack resolves each via `lambda.Function.fromFunctionAttributes`.
+ *   • There is no Cognito authorizer. Every method uses `AuthorizationType.IAM`;
+ *     the AgentCore Gateway SigV4-invokes the API with its own IAM role.
+ *   • `restApiName` is parameterized via `cdk.Fn.sub('${P}-Ordering-API', …)`.
  *   • Access-log group path parameterized via `cdk.Fn.sub('/aws/apigateway/${P}-api-access-logs', …)`.
- *   • CfnOutput `exportName` clauses stripped (P5).
+ *   • CfnOutputs carry no `exportName`, so stacks stay independently deployable.
  */
 export class ApiGatewayStack extends cdk.Stack {
   public readonly api: apigateway.RestApi;
@@ -43,7 +42,7 @@ export class ApiGatewayStack extends cdk.Stack {
 
     const getCustomerProfileArn = mkArnParam(
       'GetCustomerProfileLambdaArn',
-      'ARN of GetCustomerProfile Lambda (from cdk-outputs/tel-lambdas.json)',
+      'ARN of GetCustomerProfile Lambda (from cdk-outputs/cn-lambdas.json)',
     );
     const getPreviousOrdersArn = mkArnParam(
       'GetPreviousOrdersLambdaArn',
@@ -543,12 +542,12 @@ export class ApiGatewayStack extends cdk.Stack {
         {
           id: 'AwsSolutions-COG4',
           reason:
-            'REST API uses AWS_IAM authorization, not a Cognito User Pool Authorizer. Cognito is deliberately out of scope for telephony (design §8 non-goal #8); the AgentCore Gateway SigV4-invokes this API using its own IAM role.',
+            'REST API uses AWS_IAM authorization, not a Cognito User Pool Authorizer. There is no end-user auth surface in a telephony channel: the only caller is the AgentCore Gateway, which SigV4-invokes this API using its own IAM role.',
         },
         {
           id: 'AwsSolutions-APIG3',
           reason:
-            'WAF is out of scope for the MVP (design §8 non-goals). Revisit before production.',
+            'No AWS WAF web ACL is attached. This is a sample, and the API is reachable only via SigV4 from the AgentCore Gateway role. Attach a web ACL before production use.',
         },
         {
           id: 'AwsSolutions-APIG4',
