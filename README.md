@@ -1,529 +1,223 @@
-# Guidance for Telephony Voice Ordering on AWS with Amazon Connect Customer
+# Building a restaurant telephony AI host with Amazon Connect Customer
 
-## Table of Contents
+## Introduction
 
-1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [How It Works](#how-it-works)
-    - [Contact Flow](#contact-flow)
-    - [AI Agent Conversation](#ai-agent-conversation)
-    - [Tool Execution](#tool-execution)
-    - [Agentic Voice - Advanced ASR](#agentic-voice---advanced-asr)
-    - [AI Guardrails](#ai-guardrails)
-4. [Cost](#cost)
-5. [Prerequisites](#prerequisites)
-6. [Automated Deployment](#automated-deployment)
-7. [Manual Deployment](#manual-deployment)
-8. [Deployment Validation](#deployment-validation)
-9. [Running the Guidance](#running-the-guidance)
-10. [Cleanup](#cleanup)
-11. [Notices](#notices)
-12. [FAQ and Known Issues](#faq-and-known-issues)
-13. [Authors](#authors)
+At many restaurants, a large share of orders still arrive by phone, and those calls usually land on a staff member who is already taking care of customers at the counter. Callers wait on hold, orders get written down by hand, and busy periods make both worse. Adding an app or a website helps customers who prefer to order online, but it does nothing for the person who wants to call and order.
 
----
+In this post, we show you how to build a voice ordering system that answers a phone number and takes the order from greeting to confirmation, with no app, no website, and no sign-in. A caller dials a phone number, and an AI host greets them, answers menu questions, finds a nearby pickup location, and confirms the order out loud. The system uses [Amazon Connect](https://aws.amazon.com/connect/) for the telephony channel, [Amazon Lex V2](https://aws.amazon.com/lex/) with [Amazon Connect Agentic Voice](https://aws.amazon.com/about-aws/whats-new/2026/07/amazon-connect-agentic-voice/) for real-time speech, and [Amazon Connect AI Agents](https://aws.amazon.com/connect/) to orchestrate the conversation, connected to a restaurant backend through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) and [Amazon Bedrock AgentCore](https://aws.amazon.com/bedrock/agentcore/).
 
-## Overview
+This solution handles the telephony channel specifically. The audio arrives over the phone network rather than a browser, and the system identifies the caller by phone number rather than by a login. The solution builds the agent logic and the backend services as separate modules, so the ordering logic stays independent from the channel that calls it.
 
-This guidance demonstrates how to build a fully voice-driven ordering system for quick-service restaurants (QSR) using **Amazon Connect** as the telephony layer and **Amazon Connect AI Agents** as the orchestration layer. A caller dials a standard phone number, speaks naturally, and the AI agent takes the order end-to-end - no apps, no screens, no sign-in required.
+The walkthrough shows you how to:
 
-**Key services used:**
+- Deploy the system with [AWS Cloud Development Kit (AWS CDK)](https://aws.amazon.com/cdk/)
+- Answer an inbound phone call with Amazon Connect and route it through a contact flow
+- Provide real-time speech recognition and synthesis with Amazon Connect Agentic Voice (Advanced ASR and TTS)
+- Orchestrate the conversation and backend tool calls with an Amazon Connect AI agent
+- Keep the conversation safe and on topic with an Amazon Connect AI Guardrail
+- Connect the agent to backend services as discoverable tools through AgentCore Gateway and MCP
 
-| Service | Role |
-|---|---|
-| **Amazon Connect** | Inbound telephony, contact flow, phone number |
-| **Amazon Lex V2** | Speech interface with Amazon Connect Agentic Voice (Advanced ASR + TTS) |
-| **Amazon Connect AI Agents** | ORCHESTRATION AI Agent (Claude Haiku 4.5) - reasoning, tool calls, conversation |
-| **Amazon Connect AI Guardrails** | Content safety - filters harmful content, blocks off-topic discussions, profanity |
-| **Amazon Bedrock AgentCore Gateway** | MCP server exposing backend REST APIs as discoverable tools |
-| **Amazon AppIntegrations** | Registers the AgentCore Gateway as an MCP application |
-| **Amazon API Gateway** | REST API (`prod` stage, AWS_IAM authorization) |
-| **AWS Lambda** | Eleven Node.js functions (ten ordering + one session data push) |
-| **Amazon DynamoDB** | Five tables: Customers, Orders, Menu, Carts, Locations |
-| **Amazon Location Service** | Geocoding (place index) and route calculation |
-| **AWS CDK** | All infrastructure as code, eight CloudFormation stacks |
+Amazon Connect Agentic Voice provides the speech layer natively in Amazon Connect, handling speech recognition for listening and text-to-speech for speaking. The Amazon Lex V2 bot uses it for both, while an Amazon Connect AI agent handles the reasoning and the calls to the backend. A later section covers how Agentic Voice speeds up turn-taking.
 
-The entire solution deploys in one command and tears down completely in one command.
+## Solution overview
 
----
+The design keeps three things apart. Amazon Connect handles the call, an Amazon Connect AI agent runs the conversation, and the backend holds the menu, carts, orders, and locations. A call comes in through Amazon Connect, a contact flow opens an Amazon Connect AI agent session and connects the caller to the agent. Amazon Connect Agentic Voice provides speech recognition and synthesis throughout the call, the AI agent reasons over the conversation, and it reaches the backend through MCP tools exposed by AgentCore Gateway. Because MCP is an open standard for connecting an agent to external tools, the backend can change without touching the agent.
 
-## Architecture
+In this solution, the contact flow, the Amazon Lex V2 speech layer (Amazon Connect Agentic Voice), and the Amazon Connect AI agent are all provisioned and managed through Amazon Connect. You do not stand them up as separate services. A single Amazon Connect deployment brings the telephony, the speech, and the AI agent together. The AgentCore Gateway and the restaurant backend are the parts you build and integrate yourself.
 
-![Architecture Diagram](assets/architecture.png)
+The solution deploys the following:
 
-The solution is organized into four sections:
+- [**Amazon Connect**](https://aws.amazon.com/connect/) provides the inbound telephony, the contact flow, and the phone number that accepts calls.
+- [**Amazon Lex V2**](https://aws.amazon.com/lex/) hosts the voice bot that the contact flow connects the caller to. It uses Amazon Connect Agentic Voice for speech and routes each turn to the AI agent.
+- [**Amazon Connect Agentic Voice**](https://aws.amazon.com/about-aws/whats-new/2026/07/amazon-connect-agentic-voice/) handles Advanced ASR (with confidence-based end-of-turn detection) and expressive TTS, natively in Amazon Connect.
+- [**Amazon Connect AI Agents**](https://aws.amazon.com/connect/) provide the orchestration AI agent that drives the conversation, powered by Anthropic Claude Haiku 4.5 in Amazon Bedrock.
+- [**Amazon Connect AI Guardrails**](https://docs.aws.amazon.com/connect/latest/adminguide/create-ai-guardrails.html) keep the conversation safe and on topic with content filters, denied topics, and profanity filtering.
+- **AgentCore Gateway** exposes the backend APIs as MCP tools the agent can discover and call by name.
+- [**Amazon AppIntegrations**](https://docs.aws.amazon.com/appintegrations/latest/APIReference/Welcome.html) registers the AgentCore Gateway as an MCP application the AI agent can use.
+- [**Amazon API Gateway**](https://aws.amazon.com/api-gateway/) fronts the backend with REST endpoints secured by [AWS Identity and Access Management (IAM)](https://aws.amazon.com/iam/).
+- [**AWS Lambda**](https://aws.amazon.com/lambda/) runs the business logic for menus, carts, orders, and location lookups, and pushes the caller's phone number into the agent session.
+- [**Amazon DynamoDB**](https://aws.amazon.com/dynamodb/) stores customer profiles, orders, menu items, carts, and locations.
+- [**Amazon Location Service**](https://aws.amazon.com/location/) provides geocoding and route calculation for pickup recommendations.
 
-**Section A - Backend Infrastructure**
-Four stacks deploy the ordering backend: DynamoDB tables, Location Service resources, Lambda functions, and an API Gateway REST API with AWS_IAM authorization.
+## Architecture diagram
 
-**Section B - AgentCore Gateway**
-One stack provisions an Amazon Bedrock AgentCore Gateway with CUSTOM_JWT authorization. The gateway reads the OpenAPI schema from the REST API at deploy time, registers each endpoint as a named MCP tool, and validates inbound JWTs against the Connect instance's JWKS discovery endpoint.
+Figure 1 shows the solution, which is organized into four sections.
 
-**Section C - Connect Instance and AI Agent**
-Two stacks create the Amazon Connect instance (with Contact Lens and bot management enabled), the Amazon Connect AI Agents assistant, and the ORCHESTRATION AI Agent. The agent stack registers the AgentCore Gateway as an MCP server in Amazon AppIntegrations, creates an Amazon Lex V2 bot with Amazon Connect Agentic Voice (Advanced ASR for speech recognition), defines the AI Guardrail with content safety policies, defines the ORCHESTRATION AI Agent with the Claude Haiku 4.5 system prompt and guardrail attached, publishes the agent version, and associates a security profile that grants the agent access to all ten MCP tools.
+<img width="1388" height="829" alt="architecture" src="https://github.com/user-attachments/assets/07cc0b9e-6dac-4b32-b363-3c3ab4935893" />
 
-**Section D - Connect Telephony**
-One stack creates the contact flow and claims the phone number. The contact flow is the entry point for every inbound call - it enables logging, sets the Agentic Voice (TTS), captures the caller's phone number (ANI) as a contact attribute, opens an Amazon Connect AI Agents session tied to the assistant, stores the session ARN, pushes the caller phone number into the AI Agent session via a Lambda function (so the agent can identify the caller), plays the greeting, and connects the caller to the Amazon Lex V2 bot. The Lex bot provides the real-time speech layer (Agentic Voice Advanced ASR for listening, Agentic Voice TTS for speaking) while the AI Agent handles all reasoning and tool calling throughout the conversation. When the AI agent finishes and fires `Complete` or `Escalate`, the Lex bot returns control to the contact flow which reads the result from the Lex session attributes and disconnects the call. The phone number is claimed and associated to the contact flow as part of the same stack deployment.
+*Figure 1: The telephony voice ordering solution, organized into four sections.*
 
----
+**Section A, backend infrastructure.** This section deploys the restaurant backend. Amazon DynamoDB holds the customer, order, menu, cart, and location data, and Amazon Location Service handles addresses and routing. AWS Lambda runs the business logic, and Amazon API Gateway exposes it with IAM authorization. Resources deploy in dependency order.
 
-## How It Works
+**Section B, AgentCore Gateway.** This section provisions an AgentCore Gateway that reads the REST API's OpenAPI schema at deploy time and registers each endpoint as a named MCP tool. The gateway uses custom JSON Web Token (JWT) authorization and validates inbound tokens against the Amazon Connect instance.
 
-### Contact Flow
+**Section C, Amazon Connect instance and AI agent.** This section creates the Amazon Connect instance, the Amazon Connect AI Agents assistant, and the orchestration AI agent. It registers the AgentCore Gateway as an MCP server in Amazon AppIntegrations, creates an Amazon Lex V2 bot with Amazon Connect Agentic Voice for Advanced ASR, defines the AI Guardrail with content safety policies, defines the AI agent with the Anthropic Claude Haiku 4.5 system prompt and the guardrail attached, publishes the agent version, and associates a security profile that grants the agent access to the backend tools.
 
-When a call arrives, the contact flow executes eight blocks in sequence:
+**Section D, Amazon Connect telephony.** This section creates the contact flow and claims the phone number. The contact flow is the entry point for every inbound call. It enables logging, sets Agentic Voice for text-to-speech, captures the caller's phone number, opens an Amazon Connect AI agent session, pushes the caller's phone number into that session with a Lambda function so the agent can identify the caller, plays the greeting, and connects the caller to the Amazon Lex V2 bot. The Lex bot provides the real-time speech layer, using Agentic Voice Advanced ASR to listen and Agentic Voice TTS to speak, while the AI agent handles reasoning and tool calls.
 
-1. **Enable logging** - turns on Contact Lens flow logging so every step is recorded in CloudWatch for debugging.
-2. **Set Voice** - configures the Agentic Voice TTS engine (`connect:agentic`) with the chosen voice for the entire call.
-3. **Capture caller phone number** - records the caller's phone number from the incoming call as a contact attribute.
-4. **CreateWisdomSession** - opens an Amazon Connect AI Agents session tied to the assistant ARN. This step is mandatory - without it, the Lex bot returns "Lex needs active session for Q In Connect".
-5. **Store session** - saves the session ARN so it can be referenced throughout the rest of the call.
-6. **Push session data (Lambda)** - invokes a Lambda function that calls `UpdateSessionData` to push the caller's phone number into the AI Agent session as `Custom.callerPhoneNumber`. This enables the AI Agent to identify the caller without asking.
-7. **ConnectParticipantWithLexBot** - plays the greeting *"Thank you for calling, give me a moment to connect."* and connects the caller to the Amazon Lex V2 bot. From this point, the Lex bot provides the real-time speech layer (Agentic Voice Advanced ASR listens and detects end-of-turn, Agentic Voice TTS generates expressive voice responses) while the AI Agent handles all reasoning and tool execution autonomously until the conversation ends.
-8. **Check outcome** - after the AI agent finishes, reads the result (Complete or Escalate) and ends the call accordingly.
+The numbered callouts in Figure 1 trace the solution end to end:
 
-### AI Agent Conversation
+1. A call is initiated to the phone number provisioned by **Amazon Connect**, either by a customer or forwarded from another line.
+2. The **Amazon Connect** contact flow sets the Agentic Voice, captures the caller's phone number, opens an **Amazon Connect AI Agents** session, pushes the caller's phone number into the session, and plays the greeting to the caller.
+3. The contact flow connects the caller to the **Amazon Lex V2** bot with **Amazon Connect Agentic Voice** for speech recognition and synthesis throughout the conversation.
+4. **Amazon Lex V2** routes the conversation to **Amazon Connect AI Agents**, delegating the conversation logic to the orchestration AI agent.
+5. The **Amazon Connect** AI agent, powered by Anthropic Claude Haiku 4.5 in **Amazon Bedrock** and protected by an **AI Guardrail** for content safety, drives the conversation, resolving the caller's location, fetching the menu, managing the cart, and placing the order.
+6. The AI agent calls the available tools through **Amazon Bedrock AgentCore Gateway** using the MCP protocol.
+7. AgentCore Gateway forwards each tool call to **Amazon API Gateway**, which routes the request to the appropriate **AWS Lambda** function.
+8. AWS Lambda reads and writes **Amazon DynamoDB** for cart, order, menu, and location data, and calls **Amazon Location Service** for geocoding and nearest-location lookup.
+9. **AWS CDK** deploys all eight stacks in a single script.
+10. **Amazon CloudWatch** provides centralized monitoring, logging, and alerting across all services, and all data at rest is encrypted using **AWS KMS**.
 
-The ORCHESTRATION AI Agent (Claude Haiku 4.5 - model ID `us.anthropic.claude-haiku-4-5-20251001-v1:0`) drives all conversation turns. The system prompt is configured for voice - responses are kept concise, prices are spoken naturally ("five ninety-nine"), and internal system identifiers are never exposed to the caller. The prompt instructs it to:
+Callouts 1 through 8 happen during a single phone call, callout 9 covers how the solution is built and deployed, and callout 10 covers how it is monitored and secured. The following section sets deployment and operations aside and gets closer to the call itself.
 
-**Ordering workflow:**
-1. Greet the caller: *"Hello, welcome to {CompanyName}! What can I get started for you today?"*
-2. If the caller asks about items or prices and no `locationId` is known: ask for their city or zip code, call `GeocodeAddress`, then `GetNearestLocations` to resolve a `locationId`. Never call `GetMenu` without a `locationId`.
-3. Call `GetMenu` with the `locationId`.
-4. Call `AddToCart` for each requested item.
-5. Call `GetCart`, read back all items and the total, and ask for confirmation.
-6. On confirmation, call `PlaceOrder` to place the order.
-7. Fire the `Complete` RETURN_TO_CONTROL tool when finished, or `Escalate` if the caller requests a human. For this demo, both paths disconnect the call. In production, wire the `Escalate` path in the contact flow to a Connect queue to transfer the caller to a live agent along with the full conversation context.
+## Inbound call flow
 
-### Tool Execution
+This section follows one call from the caller's side, from the first ring to the spoken reply. It is the same runtime path as callouts 1 through 6 in Figure 1. Figure 2 shows it as a sequence so the order of events is more straightforward to see.
 
-When the agent calls a tool, the request flows:
+<img width="4760" height="940" alt="contact-flow" src="https://github.com/user-attachments/assets/229744c1-3cd2-48f5-b895-0a98b15bd661" />
 
-**Amazon Connect AI Agents** → **Amazon Bedrock AgentCore Gateway** (MCP, CUSTOM_JWT auth) → **Amazon API Gateway** (REST, AWS_IAM, `prod` stage) → **AWS Lambda** → **Amazon DynamoDB / Amazon Location Service**
+*Figure 2: Inbound call flow, with the components inside the Amazon Connect boundary.*
 
-The ten available MCP tools (all `MODEL_CONTEXT_PROTOCOL` type):
+The dashed boundary marks what Amazon Connect provides. The contact flow, the Amazon Lex V2 speech layer (Amazon Connect Agentic Voice), and the Amazon Connect AI agent all come from one Amazon Connect deployment, so you configure them through Amazon Connect rather than as standalone services. The AgentCore Gateway sits outside the boundary and connects the agent to your backend.
 
-| Tool | HTTP method + path | Lambda |
-|---|---|---|
-| `GetMenu` | `GET /menu?locationId=` | `{prefix}-GetMenu` |
-| `AddToCart` | `POST /cart` | `{prefix}-AddToCart` |
-| `GetCart` | `GET /cart?customerId=` | `{prefix}-GetCart` |
-| `UpdateCart` | `PUT /cart` | `{prefix}-UpdateCart` |
-| `PlaceOrder` | `POST /order` | `{prefix}-PlaceOrder` |
-| `GetNearestLocations` | `GET /locations/nearest?latitude=&longitude=` | `{prefix}-GetNearestLocations` |
-| `GeocodeAddress` | `GET /locations/geocode?address=` | `{prefix}-GeocodeAddress` |
-| `FindLocationAlongRoute` | `GET /locations/route?startLatitude=&startLongitude=&endLatitude=&endLongitude=` | `{prefix}-FindLocationAlongRoute` |
-| `GetCustomerProfile` | `GET /customers/profile?customerId=` | `{prefix}-GetCustomerProfile` |
-| `GetPreviousOrders` | `GET /customers/orders?customerId=` | `{prefix}-GetPreviousOrders` |
+The numbered steps in Figure 2 correspond to these stages of the call:
 
-Plus two `RETURN_TO_CONTROL` tools: `Complete` and `Escalate`.
-
-**Cart and order isolation:** Each caller has their own isolated cart. Concurrent calls cannot interfere with each other. The cart is automatically cleared after a successful order is placed.
-
-### Agentic Voice - Advanced ASR
-
-The Lex bot locale is configured with Amazon Connect Agentic Voice **Advanced ASR** (`speechRecognitionSettings.speechModelPreference: 'Advanced'`). The bot locale's `voiceSettings` is intentionally omitted so that the contact flow's Set Voice block (using `connect:agentic` engine) controls TTS. This enables confidence-based end-of-turn detection rather than relying solely on silence timeouts.
-
-**How it improves the experience:**
-
-- **Faster turn-taking** - The Advanced ASR model actively analyzes speech patterns and predicts when the caller has finished speaking. Instead of waiting for a fixed silence window (640ms default), it fires the turn as soon as it reaches confidence that the caller is done.
-- **Reduced perceived latency** - The dead time between the caller finishing their sentence and the system beginning to process is shorter, making the conversation feel more natural.
-- **Configurable thresholds** - End-of-turn confidence (default 0.7, range 0.5-0.9) and silence timeout (default 640ms, range 500-10,000ms) can be tuned per intent/slot via Lex session attributes for specific scenarios like collecting payment card numbers or addresses.
-
-**Architecture:**
-
-```
-Caller speaks → Agentic Voice Advanced ASR handles speech recognition + end-of-turn detection
-             → Lex bot routes to AMAZON.QInConnectIntent
-             → ORCHESTRATION AI Agent reasons and calls MCP tools
-             → Agentic Voice TTS speaks the response (via Set Voice block)
-```
-
-The full speech pipeline uses Amazon Connect Agentic Voice for both ASR (input) and TTS (output). The bot locale has no `voiceSettings` — TTS is controlled entirely by the Set Voice block in the contact flow with engine `connect:agentic`.
-
-**CDK configuration (bot locale):**
-
-```typescript
-botLocales: [{
-  localeId: 'en_US',
-  // voiceSettings intentionally OMITTED — TTS controlled by Set Voice block
-  speechRecognitionSettings: { speechModelPreference: 'Advanced' },
-  // ...
-}]
-```
-
-**CDK configuration (Set Voice block in contact flow):**
-
-```typescript
-{
-  Identifier: 'SetVoice',
-  Type: 'UpdateContactTextToSpeechVoice',
-  Parameters: {
-    TextToSpeechVoice: 'RONALD',       // or KATIE, BLAKE, BROOKE, GEMMA
-    TextToSpeechEngine: 'connect:agentic',
-  },
-}
-```
-
-For fine-grained control, set session attributes in your contact flow or fulfillment Lambda:
-
-```json
-{
-  "x-amz-lex:audio:end-confidence-threshold:*:*": "0.8",
-  "x-amz-lex:audio:end-timeout-ms:*:*": "800",
-  "x-amz-lex:allow-interrupt:*:*": "true"
-}
-```
-
-For more details, see [Agentic voice best practices](https://docs.aws.amazon.com/connect/latest/adminguide/agentic-voice-best-practices.html).
-
-### AI Guardrails
-
-The ORCHESTRATION AI Agent has an **AI Guardrail** attached that enforces content safety policies. The guardrail is created as a native `AWS::Wisdom::AIGuardrail` resource and versioned via `AWS::Wisdom::AIGuardrailVersion`, then associated to the agent through the `OrchestrationAIGuardrailId` property.
-
-**Policies configured:**
-
-| Policy type | Configuration |
-|---|---|
-| **Content filters** | Hate, Insults, Sexual, Violence, Misconduct: HIGH strength (input + output). Prompt Attack: MEDIUM input only. |
-| **Denied topics** | Political discussions, Financial investment advice |
-| **Word filters** | Built-in profanity list + custom word list |
-| **Blocked message** | "I am sorry, I can only help with restaurant orders. Is there anything else I can get for you?" |
-
-**Behavior:** When a caller says something off-topic (e.g., "What do you think about the election?" or "Is your food better than McDonalds?"), the guardrail intervenes and the agent responds with the blocked message, then redirects the conversation back to ordering.
-
-**CDK configuration:**
-
-```typescript
-const aiGuardrail = new wisdom.CfnAIGuardrail(this, 'RestaurantGuardrail', {
-  assistantId: assistantId.valueAsString,
-  name: 'restaurantguardrail',
-  blockedInputMessaging: 'I am sorry, I can only help with restaurant orders.',
-  blockedOutputsMessaging: 'I am sorry, I can only help with restaurant orders.',
-  contentPolicyConfig: {
-    filtersConfig: [
-      { type: 'HATE', inputStrength: 'HIGH', outputStrength: 'HIGH' },
-      { type: 'PROMPT_ATTACK', inputStrength: 'MEDIUM', outputStrength: 'NONE' },
-      // ...
-    ],
-  },
-  topicPolicyConfig: { topicsConfig: [/* denied topics */] },
-  wordPolicyConfig: { managedWordListsConfig: [{ type: 'PROFANITY' }], wordsConfig: [{ text: '...' }] },
-});
-
-// Publish version and attach to agent
-const version = new wisdom.CfnAIGuardrailVersion(this, 'GuardrailVersion', {
-  aiGuardrailId: aiGuardrail.attrAiGuardrailId,
-  assistantId: assistantId.valueAsString,
-});
-
-// In the AI Agent configuration:
-orchestrationAiGuardrailId: version.attrAiGuardrailVersionId,
-```
-
-**Important CDK notes:**
-- Stack-level tags must be removed from the `CfnAIGuardrail` resource (`cdk.Tags.of(guardrail).remove(...)`) - the `CreateAIGuardrail` API rejects the tag format that CloudFormation sends.
-- `wordPolicyConfig.wordsConfig` must not be empty - include at least one entry to prevent the CFN handler from sending an empty array which the API rejects.
-- The guardrail version ID (`attrAiGuardrailVersionId`) already includes the required version qualifier - no manual `Fn::Join` needed.
-
-For more details, see [Create AI guardrails for Connect AI agents](https://docs.aws.amazon.com/connect/latest/adminguide/create-ai-guardrails.html).
-
----
-
-## Cost
-
-You are responsible for the cost of the AWS services used while running this guidance. As of July 2026, the estimated cost for processing 1,000 voice orders averaging 5 minutes each in the US East (N. Virginia) Region is approximately **$35 per month**.
-
-Create a [Budget](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html) through [AWS Cost Explorer](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/) to help manage costs. Prices are subject to change.
-
-| AWS service | Dimensions | Cost [USD] |
-|---|---|---|
-| [Amazon Connect - inbound DID minutes](https://aws.amazon.com/connect/pricing/) | 5,000 inbound minutes at $0.0018/min | $9.00 |
-| [Amazon Bedrock - Claude Haiku 4.5 (orchestration)](https://aws.amazon.com/bedrock/pricing/) | ~8,698 text tokens/session × 1,000 sessions | $7.50 |
-| [Amazon Lex V2](https://aws.amazon.com/lex/pricing/) | 5,000 speech requests | $2.50 |
-| [Amazon Connect - phone number](https://aws.amazon.com/connect/pricing/) | 1 DID phone number | $1.00 |
-| [Amazon Bedrock AgentCore Gateway](https://aws.amazon.com/bedrock/agentcore/pricing/) | ~10,000 tool invocations | $0.10 |
-| [Amazon CloudWatch](https://aws.amazon.com/cloudwatch/pricing/) | ~3 GB log ingestion | $1.50 |
-| [AWS Lambda](https://aws.amazon.com/lambda/pricing/) | ~30,000 invocations, 256 MB, ~0.5 s avg | $0.20 |
-| [Amazon API Gateway](https://aws.amazon.com/api-gateway/pricing/) | ~10,000 REST API calls | $0.04 |
-| [Amazon DynamoDB](https://aws.amazon.com/dynamodb/pricing/) | 5 tables, on-demand, ~35,000 ops | $0.05 |
-| [Amazon Location Service](https://aws.amazon.com/location/pricing/) | ~1,000 geocode + ~500 place searches | $0.50 |
-| | **Estimated Total** | **~$35** |
-
-Notes:
-- Switching from DID to toll-free increases the inbound per-minute rate from $0.0018 to $0.012.
-- The Connect instance itself has no hourly charge - you pay for usage only.
-- Costs scale roughly linearly with call volume.
-
----
+1. The caller dials the phone number, and Amazon Connect answers.
+2. The Amazon Connect contact flow sets the Agentic Voice, captures the caller's phone number, opens an Amazon Connect AI agent session, pushes the number into that session, and plays the greeting before connecting the caller to the speech layer.
+3. Amazon Connect Agentic Voice provides speech recognition and synthesis throughout the conversation, passing each turn to the Amazon Connect AI agent.
+4. The AI agent calls backend tools through AgentCore Gateway when it needs menu, cart, order, or location data, and the spoken reply flows back to the caller.
 
 ## Prerequisites
 
-### Operating System
+Before you begin, verify you have the following in place:
 
-Tested on **macOS**, **Amazon Linux 2023**, and mainstream Linux distributions. Windows is not tested; use WSL2 if needed.
+- An [AWS account](https://signin.aws.amazon.com/signup?request_type=register)
+- Amazon Bedrock model access for Anthropic Claude Haiku 4.5 in the AWS Region where you deploy, requested on the model access page in the [Amazon Bedrock console](https://console.aws.amazon.com/bedrock/)
+- An Amazon Connect phone number quota of at least one in your account and Region, requested through the [Service Quotas console](https://console.aws.amazon.com/servicequotas/) if you have never claimed a number
+- [Node.js](https://nodejs.org/) 18.x or later, with 24.x recommended
+- [AWS Command Line Interface (AWS CLI)](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) 2.x configured with credentials
+- [git](https://git-scm.com/) to clone the repository
+- AWS CDK bootstrapped in your target account and Region (`npx cdk bootstrap aws://<ACCOUNT_ID>/<REGION>`)
 
-### Third-party tools
+The deployment enables the Contact Lens and bot management settings on the Amazon Connect instance for you, which the Amazon Lex V2 bot with Agentic Voice and the Amazon Connect AI agent require. No Docker or Python is needed. Deploy in a Region where Amazon Connect Agentic Voice, Anthropic Claude Haiku 4.5, Amazon Connect with AI agents, and AgentCore Gateway are all available. US East (N. Virginia), us-east-1, is a good place to start.
 
-- [Node.js](https://nodejs.org/) version 18.x or later (24.x recommended). Required for AWS CDK, the `esbuild` Lambda bundler, and synthetic-data scripts.
-- [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) version 2.x, configured with credentials.
-- [git](https://git-scm.com/) for cloning the repository.
+## Deploy the solution with AWS CDK
 
-No Docker, Python, or additional runtimes are required.
-
-### AWS account requirements
-
-- IAM permissions to create resources in: Amazon Connect, Amazon Lex V2, Amazon Connect AI Agents, Amazon Bedrock AgentCore Gateway, AWS Lambda, Amazon DynamoDB, Amazon Location Service, Amazon API Gateway, Amazon CloudWatch Logs, Amazon AppIntegrations, and AWS IAM.
-
-
-
-- **Amazon Bedrock model access - Anthropic Claude Haiku 4.5** (`us.anthropic.claude-haiku-4-5-20251001-v1:0`). Required for the ORCHESTRATION AI Agent. Request access through the [Amazon Bedrock console](https://console.aws.amazon.com/bedrock/) model access page.
-
-- **Amazon Connect phone number quota ≥ 1**. If you have never claimed an Amazon Connect phone number in this account and Region, request a quota increase through the [Service Quotas console](https://console.aws.amazon.com/servicequotas/) before deployment.
-
-- **`BOT_MANAGEMENT` instance attribute** - enabled automatically by the `ConnectInstanceStack` custom resource Lambda. Required for Lex bots with Agentic Voice in Connect.
-
-- **`CONTACT_LENS` instance attribute** - enabled by the `ConnectInstanceStack` CDK definition (`contactLens: true`). Required for Amazon Connect AI Agents AI Agent voice interactions.
-
-### AWS CDK bootstrap
-
-If you have not previously deployed an AWS CDK app in this account and Region:
+The full solution is available in the [sample repository on GitHub](https://github.com/aws-samples/sample-restaurant-telephony-ai-host-using-amazon-connect-customer). Clone the repository and change into the project directory.
 
 ```bash
-npx cdk bootstrap aws://<ACCOUNT_ID>/<REGION>
+git clone https://github.com/aws-samples/sample-restaurant-telephony-ai-host-using-amazon-connect-customer.git
+cd sample-restaurant-telephony-ai-host-using-amazon-connect-customer
 ```
 
-### Supported Regions
-
-`us-east-1` (US East, N. Virginia) is the recommended and tested Region. Several stack resources are configured for `us-east-1`. Before deploying to another Region, verify that all of the following are available there:
-
-- Amazon Connect Agentic Voice (enabled via Connect Customer)
-- Amazon Bedrock - Claude Haiku 4.5 (`us.anthropic.claude-haiku-4-5-20251001-v1:0`)
-- Amazon Connect with ORCHESTRATION AI Agent type
-- Amazon Bedrock AgentCore Gateway
-
----
-
-## Automated Deployment
-
-The script `scripts/deploy-all.sh` deploys all eight stacks in dependency order and seeds synthetic data into DynamoDB.
+Run the deployment script with a deployment prefix. The prefix is added to every resource name, which lets you deploy the solution more than once in the same account.
 
 ```bash
-git clone https://github.com/aws-samples/sample-restaurant-amazon-connect-telephony-ai-host-using-amazon-bedrock-agentcore.git
-cd sample-restaurant-amazon-connect-telephony-ai-host-using-amazon-bedrock-agentcore
-
 ./scripts/deploy-all.sh --deploymentPrefix qsr-cn
 ```
 
-On success, the script prints:
+The script runs a preflight check and then deploys each AWS CDK stack in dependency order, passing the outputs of one stack to the next. It builds the backend first, with the Amazon DynamoDB tables, the Amazon Location Service resources, the AWS Lambda functions, and the Amazon API Gateway REST API, and seeds sample menu and location data. It then creates the Amazon Connect instance and the Amazon Connect AI Agents assistant, adds the AgentCore Gateway in front of the backend APIs, defines the Amazon Lex V2 bot, the AI Guardrail, and the orchestration AI agent, and finally creates the contact flow and claims the phone number. The gateway is deployed after the Connect instance because it validates tokens against that instance.
 
-```
-Your restaurant AI host is live at +1XXXXXXXXXX - dial to test.
-```
+When the script completes, it prints the number to dial:
 
-### Deploy options
-
-| Flag | Default | Description |
-|---|---|---|
-| `--deploymentPrefix <name>` | `qsr-cn` | Prefix applied to all resource names. Must match `^[a-z][a-z0-9-]{1,19}$`. |
-| `--mode update\|fresh` | `update` | `update` = idempotent redeploy. `fresh` = cleanup then deploy. |
-| `--force-deploy` | - | Redeploy every stack even if already marked done. |
-| `--skip-preflight` | - | Skip Node.js / AWS CLI checks. |
-| `--only <component>` | - | Deploy one component. Valid: `cn-ddb`, `cn-location`, `cn-lambdas`, `cn-apigw`, `cn-instance`, `cn-gateway`, `cn-ai-agent`, `cn-telephony`, `cn-synthetic-data`. |
-| `--company-name "<brand>"` | `Amazing Burgers` | Brand name used in the AI agent system prompt greeting and in seeded location data. |
-| `--user-name "<name>"` | `Jane Doe` | Reserved for the synthetic loyalty customer. Not used by the default deployment - see the note below. |
-| `--synth-location "<where>"` | `Dallas, Texas` | Search anchor for Amazon Location Service geo-place queries when seeding locations. |
-| `--synth-business-name "<query>"` | `Burger Restaurants` | Search term for Amazon Location Service geo-places. Determines what real-world locations populate the Locations table. |
-| `--skip-synthetic-data` | - | Skip DynamoDB seeding entirely. |
-| `--phone-country-code <cc>` | `US` | ISO country code for the claimed phone number. |
-| `--phone-type DID\|TOLL_FREE` | `DID` | Phone number type. |
-| `--yes` | - | Non-interactive mode. |
-
-**Demo rebrand tip:** Use `--company-name` to control what brand the agent announces and `--synth-business-name` to control what real-world locations are pulled into the Locations table. For example, `--synth-business-name "Burger Restaurants" --company-name "My Restaurant"` searches for burger restaurants near `--synth-location` and brands them as "My Restaurant".
-
-**Note on loyalty seeding:** the default deployment seeds menu and location data only. No customer profile is created, and the AI Agent identifies each caller solely by the phone number pushed into its session, which is what gives every caller an isolated cart and stamps each order with the number it came from. `GetCustomerProfile` and `GetPreviousOrders` are exposed to the agent as MCP tools but the system prompt does not call them, so greeting a returning caller by name is an extension point rather than shipped behavior. `--user-name` is carried through to the seeder but only takes effect on the loyalty path, which the default deployment does not exercise.
-
-### What the script deploys
-
-1. **DynamoDBStack** - five DynamoDB tables
-2. **LocationStack** - Amazon Location Service place index and route calculator
-3. **LambdaStack** - ten Node.js 24.x Lambda ordering functions
-4. **ApiGatewayStack** - REST API (`prod` stage, AWS_IAM)
-5. Synthetic data - menu items and restaurant locations
-6. **ConnectInstanceStack** - Connect instance, Amazon Connect AI Agents assistant
-7. **AgentCoreGatewayStack** - AgentCore Gateway with MCP + CUSTOM_JWT
-8. **ConnectAIAgentStack** - Lex bot, AI Guardrail, ORCHESTRATION AI Agent, security profile
-9. **ConnectTelephonyStack** - contact flow, phone number
-
-Cross-stack identifiers are threaded via `cdk-outputs/*.json` files using `--parameters Stack:Key=Value`. There are no CloudFormation cross-stack exports.
-
----
-
-## Manual Deployment
-
-Each module is an independent AWS CDK app. Deploy in this order:
-
-| Step | Key | CDK directory | Stack ID |
-|---|---|---|---|
-| 1 | `cn-ddb` | `backend/backend-infrastructure/` | `DynamoDBStack` |
-| 2 | `cn-location` | `backend/backend-infrastructure/` | `LocationStack` |
-| 3 | `cn-lambdas` | `backend/backend-infrastructure/` | `LambdaStack` |
-| 4 | `cn-apigw` | `backend/backend-infrastructure/` | `ApiGatewayStack` |
-| 4.5 | `cn-synthetic-data` | `backend/synthetic-data/` | (Node.js script) |
-| 5 | `cn-instance` | `connect-interface/connect-instance/cdk/` | `ConnectInstanceStack` |
-| 6 | `cn-gateway` | `backend/agentcore-gateway/cdk/` | `AgentCoreGatewayStack` |
-| 7 | `cn-ai-agent` | `connect-interface/connect-ai-agent/cdk/` | `ConnectAIAgentStack` |
-| 8 | `cn-telephony` | `connect-interface/connect-telephony/cdk/` | `ConnectTelephonyStack` |
-
-Each CDK invocation requires `--parameters <StackId>:DeploymentPrefix=<prefix>` plus upstream identifiers read from `cdk-outputs/*.json`. The `deploy_stack` function in `scripts/deploy-all.sh` documents the exact parameter names per layer.
-
----
-
-## Deployment Validation
-
-After deployment completes, verify all stacks are in `CREATE_COMPLETE` or `UPDATE_COMPLETE`:
-
-```bash
-aws cloudformation list-stacks \
-  --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
-  --region us-east-1 \
-  --query "StackSummaries[].StackName"
+```text
+Your restaurant AI host is live at +1XXXXXXXXXX — dial to test.
 ```
 
-Expected stacks: `DynamoDBStack`, `LocationStack`, `LambdaStack`, `ApiGatewayStack`, `ConnectInstanceStack`, `AgentCoreGatewayStack`, `ConnectAIAgentStack`, `ConnectTelephonyStack`.
+## How the contact flow works
 
-Confirm the phone number:
+The job of the telephony layer is narrow. Amazon Connect answers the call, and a contact flow decides what happens next. The contact flow runs a short sequence of steps for every inbound call.
 
-```bash
-cat cdk-outputs/cn-telephony.json
-```
+It first enables Contact Lens logging, so each step is recorded in Amazon CloudWatch for debugging. It sets the voice for the call to Amazon Connect Agentic Voice, so every spoken response uses the agentic text-to-speech engine. It captures the caller's phone number as a contact attribute. It opens an Amazon Connect AI agent session tied to the assistant, which the Lex bot requires, and stores the session so the rest of the call can reference it. It then invokes a Lambda function that pushes the caller's phone number into the AI agent session, so the agent can identify the caller without asking. Finally, it plays a short greeting and connects the caller to the Amazon Lex V2 bot, which provides the real-time speech layer for the rest of the call, using Agentic Voice Advanced ASR to listen and Agentic Voice TTS to speak.
 
-After placing a test order, verify it was persisted:
+When the AI agent finishes, the bot returns control to the contact flow, which reads the outcome and ends the call. The agent signals the end with one of two outcomes. Complete ends a finished order, and Escalate is available when a caller asks for a person. In this solution both outcomes disconnect the call, but because the call lives in Amazon Connect, you can wire the Escalate path to an Amazon Connect queue to transfer the caller to a live agent with the full conversation context.
 
-```bash
-aws dynamodb scan --table-name <prefix>-Orders --region us-east-1 --max-items 5
-```
+## Storing menus, carts, and orders
 
----
+Five Amazon DynamoDB tables cover the ordering workflow. The Customers table stores profiles, including name, phone, and loyalty information, which you can use to recognize a returning caller. The Orders table keeps order history along with the pickup location. The Menu table holds items, prices, and availability, which can differ by location. The Carts table holds in-progress carts and uses a time-to-live value so abandoned carts clean themselves up. The Locations table holds restaurant details such as coordinates, hours, and tax rates that the agent uses for totals and recommendations. DynamoDB on-demand capacity scales with traffic, so there is no throughput to manage.
 
-## Running the Guidance
+## Finding a pickup location
 
-Dial the phone number printed at the end of `deploy-all.sh`. No browser, app, or other step is required.
+Amazon Location Service helps a caller find a convenient pickup spot without typing anything. A phone caller has no browser to share a location, so the agent asks for a ZIP code or a cross-street and uses Amazon Location Service to turn that into coordinates. From there, the backend can do a few things with those coordinates. It can find the nearest restaurants, rank them by driving time rather than straight-line distance so it favors a short detour along the caller's route, or geocode a specific address. That lets the agent say something a caller can act on, such as "the closest location is on Main Street, about five minutes away," instead of reading back an internal code.
 
-### Example conversation
+## Running the conversation with Amazon Connect AI Agents and Agentic Voice
 
-```
-Agent:  Thank you for calling, give me a moment to connect.
-        [AI Agents session starts - agent greets]
-        Hello, welcome to Amazing Burgers! What can I get started
-        for you today?
+Two managed capabilities run the conversation. Amazon Connect Agentic Voice through the Amazon Lex V2 bot provides the voice, and an Amazon Connect AI agent provides the reasoning.
 
-Caller: I'd like to order a burger.
+Amazon Connect Agentic Voice handles the speech work within the call, natively in Amazon Connect. Its Advanced ASR recognizes speech across a range of accents and tolerates the background noise that comes with a phone line, and it uses confidence-based end-of-turn detection to tell when the caller has finished, rather than waiting out a fixed silence window. That shortens the pause between the caller finishing a sentence and the agent responding, so the conversation feels more natural. Its text-to-speech generates expressive voice for the agent's replies, and a caller can interrupt the way people do on real calls. Because the contact flow selects the voice, the bot itself carries no voice setting, and changing how the agent sounds is an edit to the contact flow rather than a redeployment of the bot. The end-of-turn confidence and silence thresholds can be tuned per intent for cases such as reading back a payment card number or an address. For guidance, see [Agentic voice best practices](https://docs.aws.amazon.com/connect/latest/adminguide/agentic-voice-best-practices.html).
 
-Agent:  Sure! Which city or zip code are you ordering from?
+The Amazon Connect AI agent, powered by Anthropic Claude Haiku 4.5, decides what to do at each turn. Its system prompt is written for voice, so responses stay short, prices are spoken naturally, such as "five ninety-nine," and internal identifiers are never read out loud. The agent greets the caller, answers menu questions, resolves a pickup location, builds the cart, reads it back for confirmation, and places the order. It reaches the backend only through the tools that AgentCore Gateway exposes, so the conversation logic stays separate from the backend.
 
-Caller: 75009.
+## Connecting the agent to backend tools with MCP
 
-Agent:  [Calls GeocodeAddress, GetNearestLocations, GetMenu]
-        Great - our nearest location is Amazing Burgers at 3699
-        McKinney Avenue in Dallas. We have a Classic Burger for
-        five ninety-nine and a Deluxe Burger for eight ninety-nine.
-        What would you like?
+The AI agent never calls the backend Lambda functions directly. AgentCore Gateway sits in between and presents the backend endpoints as MCP tools that the agent discovers and calls by name, covering menu lookups, cart operations, order placement, customer and order history, geocoding, and location search. The gateway is registered with the Amazon Connect AI Agents assistant as an MCP application through Amazon AppIntegrations, and it authorizes each call with a JSON Web Token that it validates against the Amazon Connect instance.
 
-Caller: What do you think about the election?
+That layer is what keeps the design loosely coupled. When the agent calls a tool such as PlaceOrder, the gateway turns it into a REST request to Amazon API Gateway, which routes it to the matching AWS Lambda function. Because the agent talks to named tools rather than to specific functions, you can change a backend handler or add a tool without changing the agent. The same backend can also serve other channels, since they all place orders against the same tools and data.
 
-Agent:  [Guardrail intervenes - denied topic: Political Discussions]
-        I am sorry, I can only help with restaurant orders. Is there
-        anything else I can get for you?
+Figure 3 shows how a single tool call travels from the agent to the backend.
 
-Caller: Classic Burger and a fountain drink.
+<img width="4080" height="1720" alt="tool-call-flow" src="https://github.com/user-attachments/assets/da1044c7-f495-4e93-8ee2-9005dcffbf02" />
 
-Agent:  [Calls AddToCart]
-        Got it - one Classic Burger and one Fountain Drink added.
-        Your total is seven ninety-eight. Does that sound right?
+*Figure 3: A single tool call, from the AI agent to the backend.*
 
-Caller: Yes.
+## Recognizing a caller without a login
 
-Agent:  [Calls PlaceOrder]
-        Your order is confirmed. Thank you for calling Amazing Burgers!
+A phone caller does not sign in, so the system uses the caller's phone number as the basis for identity. The Amazon Connect contact flow captures the caller's phone number, and a Lambda function pushes it into the AI agent session, where the agent reads it as a session attribute. The agent turns that number into a customer identifier and uses it for every tool call in the conversation.
 
-        [Fires Complete - contact flow disconnects]
-```
+That identifier keeps each caller's cart separate and stamps the finished order with the number it came from, so an order can be matched back to a caller afterwards. If no number is available at all, because the caller blocks caller ID, the agent generates an anonymous identifier for the session and the order still goes through. Each caller gets an isolated cart, so concurrent calls never interfere with one another. The sample also exposes customer profile and order history as tools, so you can extend the agent to greet a returning caller by name or offer their last order.
 
-### Debugging and logging
+> **Note:** This recognizes a returning caller without asking for a login, but it is not identity verification, and the caller's phone number should not be treated as proof of who is calling. A production deployment that needs verified identity can add a step such as a one-time passcode.
 
-| Log source | Where to look |
-|---|---|
-| Contact flow | CloudWatch Logs: `/aws/connect/<prefix>-restaurant` |
-| Amazon Connect AI Agent | CloudWatch Logs: `/aws/bedrock-agentcore/runtimes/<runtime>` |
-| Lambda functions | CloudWatch Logs: `/aws/lambda/<prefix>-<function>` |
-| API Gateway access | CloudWatch Logs: `/aws/apigateway/<prefix>-api-access-logs` |
+## Keeping the conversation safe with AI Guardrails
 
----
+The AI agent has an Amazon Connect AI Guardrail attached that keeps the conversation safe and on topic. The guardrail applies content filters for harmful categories such as hate, insults, sexual content, violence, misconduct, and prompt attacks; blocks a set of denied topics such as political discussion and financial investment advice; and filters profanity with both a managed list and a custom word list.
 
-## Cleanup
+When a caller says something off topic or unsafe, the guardrail intervenes and the agent replies with a set message, such as "I am sorry, I can only help with restaurant orders," and steers the conversation back to the order. The guardrail is defined and attached to the agent in the same AWS CDK stack, so it deploys with the rest of the solution and needs no console steps.
+
+Guardrail strength is worth tuning against your own prompt rather than setting as high as it goes. Filters that are too broad will block legitimate turns, and personally identifiable information filters in particular can catch the address or ZIP code a caller has to give in order to find a pickup location.
+
+## Ordering walkthrough
+
+Dial the number from the deploy output. The agent greets you and asks what you would like. You can speak naturally, ask about the menu, give a ZIP code for pickup, and confirm the order, all by voice. While the caller talks, the agent calls backend tools in the background, so there are no pauses while data loads.
+
+You can follow the call in Amazon CloudWatch Logs. The contact flow logs show the call setup, the Amazon Connect AI agent logs show the conversation turns and the tool calls, and the order lands in the Orders table with its total and estimated ready time.
+
+## Cost
+
+You pay for the AWS services the system uses. As of July 2026, running this solution with the default settings in US East (N. Virginia) costs about \$35 per month for 1,000 voice orders that average five minutes each.
+
+The largest line items are the inbound call minutes on Amazon Connect, the Anthropic Claude Haiku 4.5 tokens for orchestration, and the Amazon Lex V2 speech requests. The solution claims a local Direct Inward Dialing (DID) number by default, which keeps the per-minute rate low; switching to a toll-free number raises it. There are no always-on compute charges, because Amazon Connect and the AI services bill by usage. Prices change, so check the pricing page for each service and set up a budget in [AWS Cost Explorer](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/) to track spend.
+
+## Clean up
+
+To avoid ongoing charges, remove the resources when you are done. The cleanup script deletes the stacks in reverse order so each stack is removed before the ones it depends on.
 
 ```bash
 ./scripts/cleanup-all.sh --force --deploymentPrefix qsr-cn
 ```
 
-> **Warning:** Cleanup is irreversible. All DynamoDB order data, the claimed phone number, the Connect instance, and all associated resources are permanently deleted. Back up any data you want to keep before running cleanup.
+Cleanup is destructive. It releases the phone number, deletes the order history in Amazon DynamoDB, and removes the Amazon Connect instance, the Amazon Connect AI Agents assistant, the AI agent, the AI Guardrail, the Amazon Lex V2 bot, and the AgentCore Gateway. Back up anything you want to keep first. When the script finishes, confirm in the [AWS CloudFormation console](https://console.aws.amazon.com/cloudformation/) that all eight stacks show as deleted and that the phone number has been released.
 
-The script destroys stacks in this order (reverse of deploy):
+## Conclusion
 
-1. `ConnectTelephonyStack` - releases the phone number, deletes the contact flow
-2. `ConnectAIAgentStack` - disassociates security profiles, deletes the AI Agent, AI Guardrail, Lex bot, system prompt, AppIntegrations application
-3. `ConnectInstanceStack` - deletes the Connect instance and Amazon Connect AI Agents assistant
-4. `AgentCoreGatewayStack` - deletes the AgentCore Gateway, target, and gateway IAM service role
-5. `ApiGatewayStack` - deletes the REST API
-6. `LambdaStack` - deletes the ten Lambda functions
-7. `LocationStack` - deletes the place index and route calculator
-8. `DynamoDBStack` - deletes all five DynamoDB tables
+In this post, we showed you how to build a telephony voice ordering system that answers a phone call and takes an order end to end. Amazon Connect answers the call and runs a contact flow, Amazon Connect Agentic Voice provides real-time speech recognition and synthesis, an Amazon Connect AI agent handles the reasoning with an AI Guardrail keeping it safe and on topic, and AgentCore Gateway connects the agent to the backend through MCP tools. Because the agent talks to tools rather than to specific functions, you can change the backend or add tools without touching the agent, and the same backend can serve other channels.
 
-Verify in the [AWS CloudFormation console](https://console.aws.amazon.com/cloudformation/) that all eight stacks show `DELETE_COMPLETE`.
+To get started, visit the [sample repository on GitHub](https://github.com/aws-samples/sample-restaurant-telephony-ai-host-using-amazon-connect-customer) and adapt it to your menu and locations.
 
----
+## Additional resources
 
-## Notices
+- [Amazon Connect Agentic Voice best practices](https://docs.aws.amazon.com/connect/latest/adminguide/agentic-voice-best-practices.html)
+- [Create AI guardrails for Amazon Connect AI agents](https://docs.aws.amazon.com/connect/latest/adminguide/create-ai-guardrails.html)
+- [Getting started with Amazon Bedrock AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-get-started-toolkit.html)
+- [Model Context Protocol specification](https://modelcontextprotocol.io/)
+- [Amazon Connect Administrator Guide](https://docs.aws.amazon.com/connect/latest/adminguide/)
+- [Amazon Lex V2 Developer Guide](https://docs.aws.amazon.com/lexv2/latest/dg/)
+- [Amazon Location Service documentation](https://docs.aws.amazon.com/location/)
 
-*Customers are responsible for making their own independent assessment of the information in this Guidance. This Guidance: (a) is for informational purposes only, (b) represents AWS current product offerings and practices, which are subject to change without notice, and (c) does not create any commitments or assurances from AWS and its affiliates, suppliers or licensors. AWS products or services are provided "as is" without warranties, representations, or conditions of any kind, whether express or implied. AWS responsibilities and liabilities to its customers are controlled by AWS agreements, and this Guidance is not part of, nor does it modify, any agreement between AWS and its customers.*
+## About the authors
 
----
+**Sergio Barraza** is a Senior Technical Account Manager at AWS, helping customers design and optimize cloud solutions. With more than 25 years in software development, he guides customers through AWS service adoption. Outside work, Sergio plays guitar, piano, and drums, and practices Wing Chun Kung Fu.
 
-## FAQ and Known Issues
+**Salman Ahmed** is a Senior Technical Account Manager at AWS, specializing in helping customers design, implement, and optimize their AWS environments. He combines deep networking expertise with a passion for exploring emerging technologies to help organizations get the most out of their cloud investments. Outside of work, he enjoys photography, traveling, and watching his favorite sports teams.
 
-**Q: The AI agent says it cannot pull up the menu on the first try.**
-A: The agent must resolve a location before calling `GetMenu`. The system prompt enforces this: the agent asks for a city or zip code, calls `GeocodeAddress`, then `GetNearestLocations` to get a `locationId`, and only then calls `GetMenu`. If the agent skips this sequence and calls `GetMenu` without a `locationId`, the Lambda returns a 400 error and the agent retries.
-
-**Q: Why does the customer ID show as `anon-XXXXXXXX` instead of the phone number?**
-A: The contact flow captures the caller ANI, then the Push Session Data Lambda calls `UpdateSessionData` to write it into the AI Agent session as `Custom.callerPhoneNumber`. The system prompt reads it as `{{$.Custom.callerPhoneNumber}}`. Contact attributes are not visible to an AI prompt, so this Lambda hop is required. The fallback to `anon-` is intentional for callers with no ANI (e.g. calling from a simulator or a number that blocks caller ID). Order isolation is guaranteed in both cases - each caller has a unique cart partition key in DynamoDB.
-
-**Q: The deploy fails with `Each variable may only appear once.`**
-A: The `AWS::Wisdom::AIPrompt` API rejects a prompt template that references the same variable more than once. If you edit the system prompt, `{{$.Custom.callerPhoneNumber}}` (and any other `{{$....}}` variable) must appear exactly once in the template.
-
-**Q: The ConnectAIAgentStack deploy fails or MCP tools show "Insufficient" permissions.**
-A: The security profile must be correctly associated to the AI Agent after the agent version is published. The stack handles this automatically. If you manually update the agent outside CDK, redeploy the `cn-ai-agent` stack to restore the security profile association.
-
-**Q: The deploy fails with `InvalidContactFlowException`.**
-A: The `ConnectParticipantWithLexBot` block requires a non-empty `Text` parameter. The current value is `"Thank you for calling, give me a moment to connect."` Ensure this field is never empty.
-
-**Q: CDK emits `UnclearLambdaEnvironment` warnings during synth.**
-A: These warnings appear when Lambda functions imported via `fromFunctionArn` use CfnParameter tokens. They are suppressed where possible and do not affect deployment.
-
-**Q: The `ConnectTelephonyStack` deploy fails with "Phone number not available."**
-A: This can happen when a previously released phone number hasn't cleared the pool yet. Retry the deploy - CloudFormation will claim a different available number. This is a rare timing issue that only occurs when you release and immediately re-claim in the same Region.
-
-**Q: The deploy succeeds but calls to the number connect to silence.**
-
-A: The claimed number is not routable, even though Amazon Connect reports it as `CLAIMED`. Calls connect somewhere upstream in the carrier network and never reach Amazon Connect, so there is no ring and no greeting. You can confirm it by placing a call and checking that there is no contact trace record, no contact flow log, and no `ConcurrentCalls` metric on the instance while you are still connected. If all three are empty, the contact flow, the Lex bot, and the AI Agent never ran and none of them are worth debugging. Claim a different number, point it at the same contact flow, and dial again. This is most likely right after a cleanup followed by a fresh deploy, because the new number is drawn from the same pool the previous one was just returned to.
-
-**Q: Can multiple callers order simultaneously?**
-A: Yes. Each caller gets a unique `customerId` and therefore a unique DynamoDB partition key (`CUSTOMER#{customerId}`). Cart and order data are fully isolated per caller.
-
----
-
-## Authors
-
-- Sergio Barraza, Senior TAM
-- Ravi Kumar, Senior TAM
-- Salman Ahmed, Senior TAM
+**Ravi Kumar** is a Senior Technical Account Manager in AWS Enterprise Support who helps customers in the travel and hospitality industry run their cloud operations. He has more than 20 years of IT experience and explores applications of generative AI in cloud computing. Outside of work, Ravi enjoys painting, cricket, and traveling to new places.
