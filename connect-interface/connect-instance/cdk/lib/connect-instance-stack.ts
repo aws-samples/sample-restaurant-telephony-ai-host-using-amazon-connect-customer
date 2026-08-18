@@ -34,10 +34,23 @@ export class ConnectInstanceStack extends cdk.Stack {
     });
     const prefix = deploymentPrefix.valueAsString;
 
+    // Globally-unique suffix for the Connect instance alias. The alias is part
+    // of the GLOBAL `<alias>.my.connect.aws` URL namespace shared across ALL AWS
+    // customers, so a fixed `<prefix>-restaurant` collides with other accounts.
+    // deploy-all.sh generates a random token once, persists it, and passes it
+    // here — so the alias is globally unique yet stable across redeploys (a
+    // changing alias would force-replace the instance).
+    const aliasSuffix = new cdk.CfnParameter(this, 'AliasSuffix', {
+      type: 'String',
+      allowedPattern: '^[a-z0-9]{1,30}$',
+      constraintDescription: 'must be 1-30 lowercase alphanumeric chars',
+    });
+    const suffix = aliasSuffix.valueAsString;
+
     // ─── Connect Instance ─────────────────────────────────────────────────────
     const instance = new connect.CfnInstance(this, 'ConnectInstance', {
       identityManagementType: 'CONNECT_MANAGED',
-      instanceAlias: cdk.Fn.sub('${P}-restaurant', { P: prefix }),
+      instanceAlias: cdk.Fn.sub('${P}-restaurant-${S}', { P: prefix, S: suffix }),
       attributes: {
         inboundCalls: true,
         outboundCalls: false,
@@ -193,6 +206,14 @@ export class ConnectInstanceStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'AssistantArn', {
       value: assistant.attrAssistantArn,
       description: 'Amazon Connect AI Agents Assistant ARN',
+    });
+
+    // Single source of truth for the instance access URL. The gateway consumes
+    // this (via cdk-outputs) for its JWT auth discovery instead of re-deriving
+    // it from the prefix, so the randomized alias stays consistent across stacks.
+    new cdk.CfnOutput(this, 'ConnectInstanceUrl', {
+      value: cdk.Fn.sub('https://${P}-restaurant-${S}.my.connect.aws', { P: prefix, S: suffix }),
+      description: 'Connect instance access URL (used by the gateway for JWT auth discovery).',
     });
   }
 }

@@ -402,11 +402,28 @@ fi
 ################################################################################
 # Layer 5: Connect Instance + Amazon Connect AI Agents Assistant (Section C)
 ################################################################################
+# The Connect instance alias is part of the GLOBAL `<alias>.my.connect.aws`
+# namespace shared across every AWS customer, so a fixed `<prefix>-restaurant`
+# can collide with another account. Generate a random suffix ONCE, persist it
+# (gitignored), and reuse it on redeploys so the alias stays stable — a changing
+# alias would force CloudFormation to replace the instance on every deploy.
+ALIAS_SUFFIX_FILE="$WORKSPACE_ROOT/$OUTPUTS_DIR/connect-alias-suffix.txt"
+mkdir -p "$WORKSPACE_ROOT/$OUTPUTS_DIR"
+if [ -s "$ALIAS_SUFFIX_FILE" ]; then
+  ALIAS_SUFFIX=$(tr -d '[:space:]' < "$ALIAS_SUFFIX_FILE")
+  print_info "Reusing Connect alias suffix: ${ALIAS_SUFFIX}"
+else
+  ALIAS_SUFFIX=$(openssl rand -hex 4)
+  printf '%s' "$ALIAS_SUFFIX" > "$ALIAS_SUFFIX_FILE"
+  print_info "Generated Connect alias suffix: ${ALIAS_SUFFIX} (persisted to ${ALIAS_SUFFIX_FILE})"
+fi
+
 if should_deploy "cn-instance"; then
   deploy_stack "cn-instance" \
     "connect-interface/connect-instance/cdk" \
     "ConnectInstanceStack" \
-    "cn-instance.json"
+    "cn-instance.json" \
+    "ConnectInstanceStack:AliasSuffix=${ALIAS_SUFFIX}"
 fi
 
 ################################################################################
@@ -421,7 +438,7 @@ if should_deploy "cn-gateway"; then
     "AgentCoreGatewayStack:ApiGatewayId=$(json_val cn-apigw.json ApiGatewayStack ApiGatewayId)" \
     "AgentCoreGatewayStack:ApiGatewayUrl=$(json_val cn-apigw.json ApiGatewayStack ApiGatewayUrl)" \
     "AgentCoreGatewayStack:ApiGatewayRestApiId=$(json_val cn-apigw.json ApiGatewayStack ApiGatewayRestApiId)" \
-    "AgentCoreGatewayStack:ConnectInstanceUrl=https://${PROJECT_PREFIX}-restaurant.my.connect.aws"
+    "AgentCoreGatewayStack:ConnectInstanceUrl=$(json_val cn-instance.json ConnectInstanceStack ConnectInstanceUrl)"
 fi
 
 ################################################################################
